@@ -1,0 +1,10 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>SecureCore.Auth.Abstractions</RootNamespace>
+    <Description>Contratos, interfaces y modelos para SecureCore Auth Framework. Sin dependencias externas.</Description>
+    <PackageTags>auth;identity;abstractions;interfaces</PackageTags>
+  </PropertyGroup>
+
+</Project>

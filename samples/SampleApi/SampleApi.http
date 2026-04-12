@@ -1,0 +1,51 @@
+### SecureCore Auth — Sample API HTTP Requests
+### Usa estas solicitudes para probar la API desde tu editor.
+
+### 1. Información del API
+GET http://localhost:5000/
+
+### 2. Login con usuario de prueba
+POST http://localhost:5000/auth/login
+Content-Type: application/json
+
+{
+  "email": "demo@securecore.dev",
+  "password": "P@ssw0rd123!"
+}
+
+### 3. Registrar un nuevo usuario
+POST http://localhost:5000/api/register
+Content-Type: application/json
+
+{
+  "email": "nuevo@ejemplo.com",
+  "password": "MiC0ntraseña!Segura",
+  "displayName": "Nuevo Usuario"
+}
+
+### 4. Obtener perfil (requiere JWT)
+### Reemplaza {{access_token}} con el token obtenido del login
+GET http://localhost:5000/api/profile
+Authorization: Bearer {{access_token}}
+
+### 5. Rotar Refresh Token
+### Reemplaza {{refresh_token}} con el token obtenido del login
+POST http://localhost:5000/auth/refresh
+Content-Type: application/json
+
+{
+  "refreshToken": "{{refresh_token}}"
+}
+
+### 6. Cerrar sesión
+POST http://localhost:5000/auth/logout
+Content-Type: application/json
+Authorization: Bearer {{access_token}}
+
+{
+  "refreshToken": "{{refresh_token}}"
+}
+
+### 7. Cerrar TODAS las sesiones (Botón de Pánico)
+POST http://localhost:5000/auth/revoke-all
+Authorization: Bearer {{access_token}}

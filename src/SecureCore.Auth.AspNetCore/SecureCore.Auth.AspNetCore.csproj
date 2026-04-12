@@ -1,0 +1,21 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>SecureCore.Auth.AspNetCore</RootNamespace>
+    <Description>Integración de SecureCore Auth con ASP.NET Core: Middlewares, Filters y Fluent API.</Description>
+    <PackageTags>auth;aspnetcore;middleware;jwt-bearer</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SecureCore.Auth.Abstractions\SecureCore.Auth.Abstractions.csproj" />
+    <ProjectReference Include="..\SecureCore.Auth.Core\SecureCore.Auth.Core.csproj" />
+    <ProjectReference Include="..\SecureCore.Auth.WebAuthn\SecureCore.Auth.WebAuthn.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.0.0" />
+  </ItemGroup>
+
+</Project>

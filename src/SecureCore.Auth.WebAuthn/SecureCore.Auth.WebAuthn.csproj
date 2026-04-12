@@ -1,0 +1,19 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <RootNamespace>SecureCore.Auth.WebAuthn</RootNamespace>
+    <Description>Soporte para FIDO2/WebAuthn (Passkeys) para SecureCore Auth Framework.</Description>
+    <PackageTags>auth;webauthn;fido2;passkeys</PackageTags>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\SecureCore.Auth.Abstractions\SecureCore.Auth.Abstractions.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Fido2" Version="4.0.0" />
+    <PackageReference Include="Fido2.Models" Version="4.0.0" />
+  </ItemGroup>
+
+</Project>
