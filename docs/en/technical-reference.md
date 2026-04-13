@@ -50,6 +50,15 @@ Configuration for password hashing using Argon2id.
 | `Parallelism` | `int` | 4 | Number of simultaneous threads. |
 | `HashSize` | `int` | 32 | Resulting hash length in bytes. |
 
+### 2.4. PasswordResetOptions
+Defines the account recovery policy.
+
+| Property | Type | Default Value | Validation |
+| :--- | :--- | :--- | :--- |
+| `TokenLifetimeMinutes` | `int` | 15 | [1, 1440] |
+| `TokenSizeBytes` | `int` | 32 | [16, 64] |
+| `MaxRequestsPerHour` | `int` | 3 | [0, 100] |
+
 ---
 
 ## 3. Infrastructure Interfaces (SPI)
@@ -72,6 +81,17 @@ Manages persistence of Refresh Tokens for RTR (Refresh Token Rotation).
 - `Task RevokeAsync(string tokenHash, string? replacedByHash, CancellationToken ct)`
 - `Task RevokeByFamilyAsync(string familyId, CancellationToken ct)`
 
+### 3.3. IPasswordResetStore
+Persistence for single-use tokens.
+- `Task StoreAsync(PasswordResetEntry entry, CancellationToken ct)`
+- `ValueTask<PasswordResetEntry?> FindByTokenHashAsync(string tokenHash, CancellationToken ct)`
+- `Task MarkAsUsedAsync(string tokenHash, CancellationToken ct)`
+- `ValueTask<int> CountRecentRequestsAsync(string userId, DateTime since, CancellationToken ct)`
+
+### 3.4. IResetTokenMailer
+Interface for recovery notification dispatch.
+- `Task SendResetEmailAsync(string email, string rawToken, CancellationToken ct)`
+
 ---
 
 ## 4. Core Services (API)
@@ -88,6 +108,11 @@ Responsible for token generation and validation.
 
 - **`GenerateTokenPairAsync(UserIdentity user)`**: Generates Access Token (JWT) and Refresh Token (Base64Url).
 - **`HashRefreshToken(string token)`**: Generates SHA256 hash for secure storage of session tokens.
+
+### 4.3. PasswordResetOrchestrator
+Manages the reset lifecycle.
+- **`RequestPasswordResetAsync(email)`**: Validates existence (constant-time), applies rate limiting, generates opaque token, and dispatches email.
+- **`ConfirmPasswordResetAsync(token, newPassword)`**: Validates token hash, updates credentials, and triggers `RevokeAllSessionsAsync`.
 
 ---
 
@@ -112,6 +137,8 @@ services.AddSecureAuth(options => { ... })
 - `POST /refresh`: Refresh Token rotation.
 - `POST /logout`: Revocation of the current token.
 - `POST /revoke-all`: Global session reset (SecurityStamp change).
+- `POST /forgot-password`: Recovery flow initiation.
+- `POST /reset-password`: Confirmation and credential change.
 
 ---
 
@@ -124,6 +151,8 @@ The system dispatches asynchronous domain events via `IAuthEventDispatcher`.
 - `LoginSuccess`: Successful login processed.
 - `LoginFailed`: Invalid credential (with attempt metadata).
 - `SuspiciousActivityDetected`: Detected attempt to reuse a previously rotated Refresh Token.
+- `PasswordResetRequested`: Reset request initiated by email.
+- `PasswordResetCompleted`: Successful password change via token.
 
 ### 6.2. Enumeration Mitigation
 The framework guarantees constant response time on authentication failures by injecting dummy hashing operations when the user is not found in the data store.
