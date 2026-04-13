@@ -71,6 +71,40 @@ public class SecureAuthBuilder(IServiceCollection services)
         Services.AddScoped<SecureCore.Auth.WebAuthn.PasskeyService>();
         return this;
     }
+
+    /// <summary>
+    /// Habilita la funcionalidad de recuperación y restablecimiento de contraseña.
+    /// Registra las configuraciones y el orquestador principal.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: Este método registra el sistema de reset de forma opcional (Opt-in).
+    /// Si el desarrollador no llama a este método, los servicios de reset no se inyectan 
+    /// y los endpoints correspondientes responderán 503, manteniendo la superficie de 
+    /// ataque al mínimo si la funcionalidad no es requerida.
+    /// </remarks>
+    /// <param name="configure">Acción opcional para sobrescribir las opciones por defecto.</param>
+    /// <returns>El builder para encadenamiento.</returns>
+    public SecureAuthBuilder AddPasswordReset(Action<PasswordResetOptions>? configure = null)
+    {
+        Services.AddOptions<PasswordResetOptions>()
+            .BindConfiguration(PasswordResetOptions.SectionName)
+            .PostConfigure(opt =>
+            {
+                if (configure is not null)
+                {
+                    var overrides = new PasswordResetOptions();
+                    configure(overrides);
+                    opt.TokenLifetimeMinutes = overrides.TokenLifetimeMinutes;
+                    opt.TokenSizeBytes = overrides.TokenSizeBytes;
+                    opt.MaxRequestsPerHour = overrides.MaxRequestsPerHour;
+                }
+            })
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+
+        Services.AddScoped<PasswordResetOrchestrator>();
+        return this;
+    }
 }
 
 /// <summary>

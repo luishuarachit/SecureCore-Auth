@@ -148,6 +148,68 @@ public static class SecureAuthEndpoints
         .WithDescription("Cierra todas las sesiones del usuario (botón de pánico).")
         .RequireAuthorization();
 
+        // ─────────────────────────────────────────────────────────
+        //  POST /auth/forgot-password
+        // ─────────────────────────────────────────────────────────
+        /// <remarks>
+        /// DIDÁCTICA: Este endpoint es "ciego". Siempre retorna 200 OK para evitar 
+        /// ataques de enumeración (donde un atacante prueba emails para ver cuáles 
+        /// están registrados). Además, verifica si el servicio está configurado 
+        /// de forma segura para evitar excepciones en tiempo de ejecución.
+        /// </remarks>
+        group.MapPost("/forgot-password", async (
+            ForgotPasswordRequest request,
+            IServiceProvider serviceProvider,
+            CancellationToken ct) =>
+        {
+            var orchestrator = serviceProvider.GetService<PasswordResetOrchestrator>();
+            if (orchestrator is null)
+            {
+                return Results.Json(
+                    new { error = "password_reset_not_configured", message = "El restablecimiento de contraseña no está configurado." },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            await orchestrator.RequestPasswordResetAsync(request.Email, ct);
+            
+            // Siempre respondemos 200 OK independientemente de qué ocurrió en Orchestrator.
+            return Results.Ok(new { message = "Si tu dirección existe en nuestro sistema, recibirás un correo con instrucciones." });
+        })
+        .WithName("ForgotPassword")
+        .WithDescription("Solicita un enlace para restablecer la contraseña.")
+        .AllowAnonymous();
+
+        // ─────────────────────────────────────────────────────────
+        //  POST /auth/reset-password
+        // ─────────────────────────────────────────────────────────
+        group.MapPost("/reset-password", async (
+            ResetPasswordRequest request,
+            IServiceProvider serviceProvider,
+            CancellationToken ct) =>
+        {
+            var orchestrator = serviceProvider.GetService<PasswordResetOrchestrator>();
+            if (orchestrator is null)
+            {
+                return Results.Json(
+                    new { error = "password_reset_not_configured", message = "El restablecimiento de contraseña no está configurado." },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            var result = await orchestrator.ConfirmPasswordResetAsync(request.Token, request.NewPassword, ct);
+
+            if (result == SecureCore.Auth.Abstractions.Models.PasswordResetResult.Success)
+            {
+                return Results.Ok(new { message = "Contraseña restablecida exitosamente. Por seguridad, todas tus sesiones han sido cerradas." });
+            }
+
+            return Results.Json(
+                new { error = "invalid_token", message = "El enlace de restablecimiento es inválido o ha expirado." },
+                statusCode: StatusCodes.Status400BadRequest);
+        })
+        .WithName("ResetPassword")
+        .WithDescription("Confirma y actualiza la contraseña con un token válido.")
+        .AllowAnonymous();
+
         return group;
     }
 }
@@ -170,3 +232,13 @@ public record RefreshRequest(string RefreshToken);
 /// Solicitud de cierre de sesión.
 /// </summary>
 public record LogoutRequest(string RefreshToken);
+
+/// <summary>
+/// Solicitud de enlace para recuperar contraseña por email.
+/// </summary>
+public record ForgotPasswordRequest(string Email);
+
+/// <summary>
+/// Solicitud de inserción de nueva contraseña ligada a un token.
+/// </summary>
+public record ResetPasswordRequest(string Token, string NewPassword);

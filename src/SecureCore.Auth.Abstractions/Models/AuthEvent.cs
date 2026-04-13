@@ -70,5 +70,11 @@ public enum AuthEventType
     PasskeyRegistered,
 
     /// <summary>Inicio de sesión con Passkey exitoso.</summary>
-    PasskeyLoginSuccess
+    PasskeyLoginSuccess,
+
+    /// <summary>Token de restablecimiento de contraseña solicitado.</summary>
+    PasswordResetRequested,
+
+    /// <summary>Contraseña restablecida exitosamente.</summary>
+    PasswordResetCompleted
 }

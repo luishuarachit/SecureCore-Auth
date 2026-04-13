@@ -13,7 +13,7 @@
     <Company>SecureCore</Company>
     <Product>SecureCore Auth Framework</Product>
     <Description>Una solución de identidad y sesiones modular, agnóstica a la base de datos, compatible con Passkeys.</Description>
-    <Version>1.0.0</Version>
+    <Version>1.1.0</Version>
     <RepositoryType>git</RepositoryType>
   </PropertyGroup>
 </Project>

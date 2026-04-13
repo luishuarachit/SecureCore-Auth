@@ -41,6 +41,22 @@ public interface IUserStore
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Actualiza el hash de contraseña del usuario.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: Este método permite aplicar cambios legítimos de credenciales,
+    /// por ejemplo en el restablecimiento al perder contraseñas, o cuando se demanda
+    /// la reactualización del resguardo hash en implementaciones legacy de la base de datos a un cifrado Argon2 actualizado.
+    /// </remarks>
+    /// <param name="userId">ID del usuario.</param>
+    /// <param name="newPasswordHash">El nuevo hash criptográfico a persistir (generalmente Argon2id).</param>
+    /// <param name="cancellationToken">Token de cancelación.</param>
+    Task UpdatePasswordHashAsync(
+        string userId,
+        string newPasswordHash,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Actualiza el SecurityStamp de un usuario, invalidando todas sus sesiones activas.
     /// </summary>
     /// <remarks>

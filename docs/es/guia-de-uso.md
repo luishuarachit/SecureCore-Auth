@@ -111,7 +111,7 @@ Esto instala todo lo necesario (Abstractions, Core, WebAuthn se incluyen como de
 
 ### Paso 2: Implementar los Stores (conectar tu base de datos)
 
-Este es el paso más importante: **le dices a la librería cómo acceder a tus datos**. Necesitas implementar al menos 2 interfaces.
+Este es el paso más importante: **le dices a la librería cómo acceder a tus datos**. Necesitas implementar las interfaces correspondientes.
 
 #### IUserStore — Dónde están los usuarios
 
@@ -134,8 +134,6 @@ public class MiUserStore : IUserStore
     }
 
     // Buscar un usuario por su ID único
-    // Se usa internamente cuando la librería necesita cargar un usuario
-    // (por ejemplo, al renovar un token o validar una sesión)
     public async ValueTask<UserIdentity?> FindByIdAsync(
         string userId, CancellationToken ct = default)
     {
@@ -143,8 +141,6 @@ public class MiUserStore : IUserStore
     }
 
     // Buscar un usuario por su email
-    // Se usa durante el login: el usuario escribe su email y la librería
-    // busca si existe en la base de datos
     public async ValueTask<UserIdentity?> FindByEmailAsync(
         string email, CancellationToken ct = default)
     {
@@ -153,16 +149,25 @@ public class MiUserStore : IUserStore
     }
 
     // Buscar por proveedor externo (Google, GitHub, etc.)
-    // Si no usas login social, puedes retornar null
     public ValueTask<UserIdentity?> FindByExternalProviderAsync(
         string provider, string providerKey, CancellationToken ct = default)
     {
         return ValueTask.FromResult<UserIdentity?>(null);
     }
 
+    // Actualizar el hash de contraseña (usado en el reset)
+    public async Task UpdatePasswordHashAsync(
+        string userId, string newPasswordHash, CancellationToken ct = default)
+    {
+        var user = await _db.Users.FindAsync([userId], ct);
+        if (user is not null)
+        {
+            user.PasswordHash = newPasswordHash;
+            await _db.SaveChangesAsync(ct);
+        }
+    }
+
     // Actualizar el SecurityStamp
-    // Esto se llama cuando el usuario cierra TODAS sus sesiones
-    // o cuando cambia su contraseña
     public async Task UpdateSecurityStampAsync(
         string userId, string newStamp, CancellationToken ct = default)
     {
@@ -175,7 +180,6 @@ public class MiUserStore : IUserStore
     }
 
     // Obtener el SecurityStamp actual
-    // Se usa para verificar si las sesiones del usuario siguen siendo válidas
     public async ValueTask<string?> GetSecurityStampAsync(
         string userId, CancellationToken ct = default)
     {
@@ -183,8 +187,7 @@ public class MiUserStore : IUserStore
         return user?.SecurityStamp;
     }
 
-    // Incrementar el contador de intentos fallidos de login
-    // Sirve para bloquear la cuenta después de N intentos incorrectos
+    // Incrementar el contador de intentos fallidos
     public async Task<int> IncrementFailedAccessCountAsync(
         string userId, CancellationToken ct = default)
     {
@@ -198,7 +201,7 @@ public class MiUserStore : IUserStore
         return 0;
     }
 
-    // Resetear el contador cuando el login es exitoso
+    // Resetear el contador
     public async Task ResetFailedAccessCountAsync(
         string userId, CancellationToken ct = default)
     {
@@ -211,7 +214,6 @@ public class MiUserStore : IUserStore
     }
 
     // Establecer hasta cuándo está bloqueada la cuenta
-    // Null = desbloqueada. Una fecha futura = bloqueada hasta esa fecha
     public async Task SetLockoutEndAsync(
         string userId, DateTimeOffset? lockoutEnd, CancellationToken ct = default)
     {
@@ -227,7 +229,7 @@ public class MiUserStore : IUserStore
 
 #### ISessionStore — Dónde se guardan las sesiones
 
-Esta interfaz gestiona los Refresh Tokens (las "sesiones" del usuario). Cada vez que un usuario inicia sesión, se crea una entrada aquí.
+Esta interfaz gestiona los Refresh Tokens (las "sesiones" del usuario).
 
 ```csharp
 using Microsoft.EntityFrameworkCore;
@@ -240,17 +242,12 @@ public class MiSessionStore : ISessionStore
 
     public MiSessionStore(MiDbContext db) => _db = db;
 
-    // Guardar un nuevo Refresh Token
-    // Se llama cada vez que un usuario inicia sesión o renueva su token
     public async Task CreateAsync(RefreshTokenEntry entry, CancellationToken ct = default)
     {
         _db.RefreshTokens.Add(entry);
         await _db.SaveChangesAsync(ct);
     }
 
-    // Buscar un token por su hash
-    // IMPORTANTE: nunca guardamos el token en texto plano, solo su hash SHA-256
-    // Es como guardar el hash de una contraseña en vez de la contraseña
     public async ValueTask<RefreshTokenEntry?> FindByTokenHashAsync(
         string tokenHash, CancellationToken ct = default)
     {
@@ -258,8 +255,6 @@ public class MiSessionStore : ISessionStore
             .FirstOrDefaultAsync(t => t.TokenHash == tokenHash, ct);
     }
 
-    // Revocar (invalidar) un token específico
-    // Se llama cuando el usuario cierra sesión o cuando se rota el token
     public async Task RevokeAsync(
         string tokenHash, string? replacedByHash = null, CancellationToken ct = default)
     {
@@ -274,9 +269,6 @@ public class MiSessionStore : ISessionStore
         }
     }
 
-    // Revocar TODOS los tokens de una "familia"
-    // Una familia es una cadena de tokens rotados. Si alguien intenta
-    // reusar un token viejo, se revocan TODOS como medida de seguridad
     public async Task RevokeByFamilyAsync(
         string familyId, CancellationToken ct = default)
     {
@@ -290,8 +282,6 @@ public class MiSessionStore : ISessionStore
         await _db.SaveChangesAsync(ct);
     }
 
-    // Revocar TODAS las sesiones de un usuario
-    // Se usa con el "botón de pánico" para cerrar todas las sesiones
     public async Task RevokeAllByUserAsync(
         string userId, CancellationToken ct = default)
     {
@@ -306,6 +296,81 @@ public class MiSessionStore : ISessionStore
     }
 }
 ```
+
+#### IPasswordResetStore — Control de tokens de recuperación
+
+Si quieres habilitar la recuperación de contraseña, necesitas implementar este almacén para guardar los hashes de los tokens temporales.
+
+```csharp
+using Microsoft.EntityFrameworkCore;
+using SecureCore.Auth.Abstractions.Interfaces;
+using SecureCore.Auth.Abstractions.Models;
+
+public class MiPasswordResetStore : IPasswordResetStore
+{
+    private readonly MiDbContext _db;
+    public MiPasswordResetStore(MiDbContext db) => _db = db;
+
+    // Guardar el hash del token generado
+    public async Task StoreAsync(PasswordResetEntry entry, CancellationToken ct)
+    {
+        _db.PasswordResets.Add(entry);
+        await _db.SaveChangesAsync(ct);
+    }
+
+    // Buscar por hash
+    public async ValueTask<PasswordResetEntry?> FindByTokenHashAsync(string tokenHash, CancellationToken ct)
+    {
+        return await _db.PasswordResets.FirstOrDefaultAsync(x => x.TokenHash == tokenHash, ct);
+    }
+
+    // Invalidar token tras su uso
+    public async Task MarkAsUsedAsync(string tokenHash, CancellationToken ct)
+    {
+        var entry = await _db.PasswordResets.FirstOrDefaultAsync(x => x.TokenHash == tokenHash, ct);
+        if (entry != null) {
+            entry.IsUsed = true;
+            await _db.SaveChangesAsync(ct);
+        }
+    }
+
+    // Conteo para Rate Limiting
+    public async ValueTask<int> CountRecentRequestsAsync(string userId, DateTime since, CancellationToken ct)
+    {
+        return await _db.PasswordResets.CountAsync(x => x.UserId == userId && x.CreatedAtUtc > since, ct);
+    }
+
+    public async Task DeleteExpiredAsync(CancellationToken ct)
+    {
+        var expired = _db.PasswordResets.Where(x => x.ExpiresAtUtc < DateTime.UtcNow);
+        _db.PasswordResets.RemoveRange(expired);
+        await _db.SaveChangesAsync(ct);
+    }
+}
+```
+
+#### IResetTokenMailer — Cómo enviar el correo
+
+Esta es una interfaz **agnóstica**. Tú decides si usas SMTP, SendGrid, Amazon SES, etc. La librería solo te entrega el email del usuario y el **token crudo** (que solo se ve en este momento).
+
+```csharp
+using SecureCore.Auth.Abstractions.Interfaces;
+
+public class MiEmailMailer : IResetTokenMailer
+{
+    public Task SendResetEmailAsync(string toEmail, string rawToken, CancellationToken ct)
+    {
+        // IMPORTANTE: Construye aquí el enlace que irá al frontend de tu aplicación
+        var url = $"https://tuapp.com/reset-password?token={rawToken}";
+        
+        // Lógica de envío de email real aquí...
+        Console.WriteLine($"[EMAIL] Enviando a {toEmail}: Haz clic aquí {url}");
+        return Task.CompletedTask;
+    }
+}
+```
+
+---
 
 ### Paso 3: Configurar la librería en Program.cs
 
@@ -636,6 +701,34 @@ public async Task<IResult> GoogleCallback(IdentityOrchestrator orchestrator)
 
 ---
 
+### Caso 8: Restablecimiento de contraseña (¿Olvidaste tu contraseña?)
+
+**Escenario**: Un usuario olvidó su contraseña y quiere recuperarla de forma segura.
+
+**Flujo de Seguridad**:
+
+1.  **Solicitud**: El usuario envía su email. El servidor siempre responde "Si el email existe, recibirás instrucciones", evitando confirmar si la cuenta existe (anti-enumeración).
+2.  **Token Opaco**: Se genera un token aleatorio criptográfico (CSPRNG). Solo se guarda su **hash SHA-256** en la BD. Incluso si roban tu base de datos, los tokens son inservibles.
+3.  **Confirmación**: El usuario recibe el token por email, lo envía junto a la nueva contraseña.
+4.  **Limpieza Global**: Al cambiar la contraseña exitosamente, el sistema invoca `RevokeAllSessions`, cerrando sesión en todos los demás dispositivos por seguridad inmediata.
+
+**Petición 1: Solicitar recuperación**
+```http
+POST /auth/forgot-password
+{ "email": "usuario@ejemplo.com" }
+```
+
+**Petición 2: Establecer nueva contraseña**
+```http
+POST /auth/reset-password
+{ 
+  "token": "TOKEN_RECIBIDO_EN_EMAIL",
+  "newPassword": "NuevaContraseñaSuperSegura"
+}
+```
+
+---
+
 ## Funcionalidades Avanzadas
 
 ### Passkeys / WebAuthn
@@ -758,6 +851,8 @@ SecureCore Auth emite eventos cada vez que algo importante sucede. Puedes captur
 | `PasskeyRegistered` | Nueva passkey registrada | Confirmación al usuario |
 | `PasskeyLoginSuccess` | Login con passkey | Registro de método de acceso |
 | `Logout` | Cierre de sesión individual | Auditoría |
+| `PasswordResetRequested` | Solicitud de reset iniciada | Envío de email secundario opcional |
+| `PasswordResetCompleted` | Contraseña cambiada con éxito | Notificación de seguridad |
 
 #### Implementar un handler personalizado
 
@@ -848,7 +943,19 @@ builder.Services.AddSecureAuth(options =>
     options.Argon2.MemorySize = 65536;  // 64 MB de RAM por hash
     options.Argon2.Iterations = 3;       // 3 pasadas
     options.Argon2.Parallelism = 4;      // 4 hilos paralelos
+
+    // ═══ Restablecimiento de contraseña ═══
+    // options.AddPasswordReset(reset => { ... }); // Se usa el builder
 });
+
+// Configuración extendida de Reset (vía .AddPasswordReset)
+builder.Services.AddSecureAuth(...)
+    .AddPasswordReset(reset => 
+    {
+        reset.TokenLifetimeMinutes = 15; // Expiración del token
+        reset.TokenSizeBytes = 32;       // Seguridad del token
+        reset.MaxRequestsPerHour = 3;    // Rate limiting por usuario
+    });
 ```
 
 ---
