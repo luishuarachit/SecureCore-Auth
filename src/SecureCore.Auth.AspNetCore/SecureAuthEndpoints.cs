@@ -151,12 +151,10 @@ public static class SecureAuthEndpoints
         // ─────────────────────────────────────────────────────────
         //  POST /auth/forgot-password
         // ─────────────────────────────────────────────────────────
-        /// <remarks>
-        /// DIDÁCTICA: Este endpoint es "ciego". Siempre retorna 200 OK para evitar 
-        /// ataques de enumeración (donde un atacante prueba emails para ver cuáles 
-        /// están registrados). Además, verifica si el servicio está configurado 
-        /// de forma segura para evitar excepciones en tiempo de ejecución.
-        /// </remarks>
+        // DIDÁCTICA: Este endpoint es "ciego". Siempre retorna 200 OK para evitar 
+        // ataques de enumeración (donde un atacante prueba emails para ver cuáles 
+        // están registrados). Además, verifica si el servicio está configurado 
+        // de forma segura para evitar excepciones en tiempo de ejecución.
         group.MapPost("/forgot-password", async (
             ForgotPasswordRequest request,
             IServiceProvider serviceProvider,
