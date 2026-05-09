@@ -186,4 +186,5 @@ Interfaz que deben implementar todos los validadores de proveedores.
 4. **GitHub**: OAuth 2.0 + User Email API.
 5. **LinkedIn**: OpenID Connect.
 6. **TikTok**: OAuth 2.0 (Login Kit V2) con manejo de errores adaptado.
+7. **Apple**: Sign In with Apple (OIDC) con generación dinámica de Client Secret vía **ES256**.
 
