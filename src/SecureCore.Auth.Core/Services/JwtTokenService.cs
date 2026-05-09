@@ -80,6 +80,15 @@ public sealed class JwtTokenService(
             claims[JwtRegisteredClaimNames.Name] = user.DisplayName;
         }
 
+        // Si hay claims adicionales, los incluimos
+        if (user.Claims != null)
+        {
+            foreach (var kv in user.Claims)
+            {
+                claims[kv.Key] = kv.Value;
+            }
+        }
+
         var tokenDescriptor = new SecurityTokenDescriptor
         {
             Subject = new ClaimsIdentity(

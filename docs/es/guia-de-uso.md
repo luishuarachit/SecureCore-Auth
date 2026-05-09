@@ -134,6 +134,8 @@ public class MiUserStore : IUserStore
     }
 
     // Buscar un usuario por su ID único
+    // Se usa internamente cuando la librería necesita cargar un usuario
+    // (por ejemplo, al renovar un token o validar una sesión)
     public async ValueTask<UserIdentity?> FindByIdAsync(
         string userId, CancellationToken ct = default)
     {
@@ -141,6 +143,8 @@ public class MiUserStore : IUserStore
     }
 
     // Buscar un usuario por su email
+    // Se usa durante el login: el usuario escribe su email y la librería
+    // busca si existe en la base de datos
     public async ValueTask<UserIdentity?> FindByEmailAsync(
         string email, CancellationToken ct = default)
     {
@@ -149,6 +153,7 @@ public class MiUserStore : IUserStore
     }
 
     // Buscar por proveedor externo (Google, GitHub, etc.)
+    // Si no usas login social, puedes retornar null
     public ValueTask<UserIdentity?> FindByExternalProviderAsync(
         string provider, string providerKey, CancellationToken ct = default)
     {
@@ -168,6 +173,8 @@ public class MiUserStore : IUserStore
     }
 
     // Actualizar el SecurityStamp
+    // Esto se llama cuando el usuario cierra TODAS sus sesiones
+    // o cuando cambia su contraseña
     public async Task UpdateSecurityStampAsync(
         string userId, string newStamp, CancellationToken ct = default)
     {
@@ -180,6 +187,7 @@ public class MiUserStore : IUserStore
     }
 
     // Obtener el SecurityStamp actual
+    // Se usa para verificar si las sesiones del usuario siguen siendo válidas
     public async ValueTask<string?> GetSecurityStampAsync(
         string userId, CancellationToken ct = default)
     {
@@ -187,7 +195,8 @@ public class MiUserStore : IUserStore
         return user?.SecurityStamp;
     }
 
-    // Incrementar el contador de intentos fallidos
+    // Incrementar el contador de intentos fallidos de login
+    // Sirve para bloquear la cuenta después de N intentos incorrectos
     public async Task<int> IncrementFailedAccessCountAsync(
         string userId, CancellationToken ct = default)
     {
@@ -201,7 +210,7 @@ public class MiUserStore : IUserStore
         return 0;
     }
 
-    // Resetear el contador
+    // Resetear el contador cuando el login es exitoso
     public async Task ResetFailedAccessCountAsync(
         string userId, CancellationToken ct = default)
     {
@@ -214,6 +223,7 @@ public class MiUserStore : IUserStore
     }
 
     // Establecer hasta cuándo está bloqueada la cuenta
+    // Null = desbloqueada. Una fecha futura = bloqueada hasta esa fecha
     public async Task SetLockoutEndAsync(
         string userId, DateTimeOffset? lockoutEnd, CancellationToken ct = default)
     {
@@ -229,7 +239,7 @@ public class MiUserStore : IUserStore
 
 #### ISessionStore — Dónde se guardan las sesiones
 
-Esta interfaz gestiona los Refresh Tokens (las "sesiones" del usuario).
+Esta interfaz gestiona los Refresh Tokens (las "sesiones" del usuario). Cada vez que un usuario inicia sesión, se crea una entrada aquí.
 
 ```csharp
 using Microsoft.EntityFrameworkCore;
@@ -255,6 +265,8 @@ public class MiSessionStore : ISessionStore
             .FirstOrDefaultAsync(t => t.TokenHash == tokenHash, ct);
     }
 
+    // Revocar (invalidar) un token específico
+    // Se llama cuando el usuario cierra sesión o cuando se rota el token
     public async Task RevokeAsync(
         string tokenHash, string? replacedByHash = null, CancellationToken ct = default)
     {
@@ -269,6 +281,9 @@ public class MiSessionStore : ISessionStore
         }
     }
 
+    // Revocar TODOS los tokens de una "familia"
+    // Una familia es una cadena de tokens rotados. Si alguien intenta
+    // reusar un token viejo, se revocan TODOS como medida de seguridad
     public async Task RevokeByFamilyAsync(
         string familyId, CancellationToken ct = default)
     {
@@ -282,6 +297,8 @@ public class MiSessionStore : ISessionStore
         await _db.SaveChangesAsync(ct);
     }
 
+    // Revocar TODAS las sesiones de un usuario
+    // Se usa con el "botón de pánico" para cerrar todas las sesiones
     public async Task RevokeAllByUserAsync(
         string userId, CancellationToken ct = default)
     {
@@ -665,39 +682,52 @@ options.Auth.LockoutDurations = new[]
 
 ---
 
-### Caso 7: Inicio de sesión externo (Google, GitHub, OAuth)
+### Caso 7: Login Social (OAuth 2.0 / OIDC) — ¡NUEVO v2.0!
 
-**Escenario**: Quieres permitir que tus usuarios inicien sesión con sus cuentas de Google o GitHub.
+**Escenario**: Quieres permitir que tus usuarios inicien sesión con Google, Microsoft, Facebook, GitHub, LinkedIn o TikTok.
 
-**Implementación**:
+SecureCore v2.0 introduce un ecosistema de proveedores modulares que cumplen con los estándares más estrictos de seguridad (OIDC, validación de Nonce, appsecret_proof).
 
-1. **Configurar ASP.NET Core**: Usa los paquetes estándar de Microsoft (`Microsoft.AspNetCore.Authentication.Google`, etc.).
-2. **Callback del Proveedor**: En tu controlador de callback, una vez que el usuario está autenticado externamente, usas `IdentityOrchestrator` para generar los tokens de SecureCore.
-
-```csharp
-[HttpGet("callback-google")]
-public async Task<IResult> GoogleCallback(IdentityOrchestrator orchestrator)
-{
-    // 1. Obtener la información de la autenticación externa de ASP.NET Core
-    var authResult = await HttpContext.AuthenticateAsync("Google");
-    
-    if (!authResult.Succeeded) return Results.Unauthorized();
-
-    // 2. Extraer el ID único del proveedor (Subject)
-    var providerKey = authResult.Principal.FindFirstValue(ClaimTypes.NameIdentifier);
-    var provider = "Google";
-
-    // 3. Dejar que SecureCore orqueste el login
-    // Buscará si el usuario ya está vinculado y generará JWT + Refresh Token
-    var (result, tokens) = await orchestrator.SignInExternalAsync(provider, providerKey);
-
-    if (result.Succeeded) return Results.Ok(tokens);
-    
-    // Si el usuario no existe, puedes redirigirlo a una página de registro
-    // o crearlo automáticamente usando el correo de los claims de Google.
-    return Results.BadRequest(new { error = "user_not_found" });
-}
+#### Paso 1: Instalar los proveedores que necesites
+```bash
+dotnet add package SecureCore.Auth.OAuth.Google
+dotnet add package SecureCore.Auth.OAuth.Microsoft
+# ... otros proveedores
 ```
+
+#### Paso 2: Configurar en Program.cs
+```csharp
+builder.Services.AddSecureAuth(options => { ... })
+    .AddOAuth(oauth => 
+    {
+        oauth.AddGoogle(google => 
+        {
+            google.ClientId = "...";
+            google.ClientSecret = "...";
+        });
+
+        oauth.AddMicrosoft(ms => 
+        {
+            ms.ClientId = "...";
+            ms.ClientSecret = "...";
+            ms.Tenant = "common"; // O tu ID de tenant específico
+        });
+        
+        // Habilitar registro automático de usuarios nuevos
+        oauth.ConfigureOptions(opts => opts.AllowImplicitRegistration = true);
+    });
+```
+
+#### Paso 3: Mapear Endpoints
+```csharp
+app.MapSecureOAuthEndpoints(); 
+// Crea automáticamente:
+// GET /auth/oauth/{provider}/authorize  -> Redirige al login social
+// GET /auth/oauth/{provider}/callback   -> Recibe el código y emite JWT de SecureCore
+```
+
+> [!TIP]
+> **Seguridad v2.0**: Todos los proveedores OIDC (Google, Microsoft, LinkedIn) ahora validan el `nonce` criptográficamente y cachean las llaves públicas (JWKS) para máximo rendimiento sin sacrificar seguridad. Facebook utiliza `appsecret_proof` (HMAC-SHA256) para proteger las llamadas servidor-servidor.
 
 ---
 

@@ -55,4 +55,9 @@ public record UserIdentity
     /// Nombre para mostrar del usuario (opcional).
     /// </summary>
     public string? DisplayName { get; init; }
+
+    /// <summary>
+    /// Claims adicionales para incluir en el JWT.
+    /// </summary>
+    public Dictionary<string, string>? Claims { get; init; }
 }

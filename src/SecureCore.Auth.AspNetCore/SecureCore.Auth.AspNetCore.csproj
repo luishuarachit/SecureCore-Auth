@@ -11,6 +11,7 @@
     <ProjectReference Include="..\SecureCore.Auth.Abstractions\SecureCore.Auth.Abstractions.csproj" />
     <ProjectReference Include="..\SecureCore.Auth.Core\SecureCore.Auth.Core.csproj" />
     <ProjectReference Include="..\SecureCore.Auth.WebAuthn\SecureCore.Auth.WebAuthn.csproj" />
+    <ProjectReference Include="..\SecureCore.Auth.OAuth\SecureCore.Auth.OAuth.csproj" />
   </ItemGroup>
 
   <ItemGroup>

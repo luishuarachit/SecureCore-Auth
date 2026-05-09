@@ -156,3 +156,34 @@ El sistema despacha eventos de dominio asíncronos mediante `IAuthEventDispatche
 
 ### 6.2. Mitigación contra Enumeración
 El framework garantiza un tiempo de respuesta constante en fallos de autenticación mediante la inyección de operaciones de hashing ficticias cuando no se localiza el usuario en el almacén de datos.
+
+---
+
+## 7. Ecosistema OAuth 2.0 / OIDC (v2.0.0)
+
+A partir de la versión 2.0.0, el framework incluye una arquitectura de validación de identidad externa desacoplada.
+
+### 7.1. IOAuthProviderValidator
+Interfaz que deben implementar todos los validadores de proveedores.
+
+- `Task<OAuthIdentityResult> ValidateIdTokenAsync(string idToken, string? expectedNonce, CancellationToken ct)`
+- `Task<OAuthIdentityResult> ExchangeCodeAsync(string code, string redirectUri, string? expectedNonce, CancellationToken ct)`
+
+### 7.2. Mecanismos de Seguridad Implementados
+
+| Característica | Propósito | Implementación |
+| :--- | :--- | :--- |
+| **Nonce Enforcement** | Previene ataques de Replay. | Validación estricta en proveedores OIDC (Google, MS, LinkedIn). |
+| **JWKS Caching** | Rendimiento y resiliencia. | Caché en memoria con `SemaphoreSlim` (expiración 24h). |
+| **AppSecret Proof** | Seguridad Servidor-Servidor. | HMAC-SHA256(AccessToken, ClientSecret) en Facebook. |
+| **Issuer Dinámico** | Multi-tenancy. | Validación por regex/prefijo en Microsoft Entra ID. |
+
+### 7.3. Proveedores Soportados
+
+1. **Google**: OpenID Connect (v2.0).
+2. **Microsoft**: Entra ID (v2.0) con soporte multi-tenant.
+3. **Facebook**: OAuth 2.0 + Graph API + AppSecret Proof.
+4. **GitHub**: OAuth 2.0 + User Email API.
+5. **LinkedIn**: OpenID Connect.
+6. **TikTok**: OAuth 2.0 (Login Kit V2) con manejo de errores adaptado.
+

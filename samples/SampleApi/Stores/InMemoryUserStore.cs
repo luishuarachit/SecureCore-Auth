@@ -130,4 +130,15 @@ public sealed class InMemoryUserStore : IUserStore
         }
         return Task.CompletedTask;
     }
+
+    /// <inheritdoc />
+    public Task UpdatePasswordHashAsync(string userId, string newHash, CancellationToken cancellationToken = default)
+    {
+        if (_usersById.TryGetValue(userId, out var user))
+        {
+            var updated = user with { PasswordHash = newHash };
+            _usersById[userId] = updated;
+        }
+        return Task.CompletedTask;
+    }
 }

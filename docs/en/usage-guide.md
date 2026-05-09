@@ -665,39 +665,52 @@ options.Auth.LockoutDurations = new[]
 
 ---
 
-### Case 7: External Login (Google, GitHub, OAuth)
+### Case 7: Social Login (OAuth 2.0 / OIDC) — NEW v2.0!
 
-**Scenario**: You want to allow your users to log in with their Google or GitHub accounts.
+**Scenario**: You want to allow your users to log in with Google, Microsoft, Facebook, GitHub, LinkedIn, or TikTok.
 
-**Implementation**:
+SecureCore v2.0 introduces a modular provider ecosystem that complies with the strictest security standards (OIDC, Nonce validation, appsecret_proof).
 
-1. **Configure ASP.NET Core**: Use the standard Microsoft packages (`Microsoft.AspNetCore.Authentication.Google`, etc.).
-2. **Provider Callback**: In your callback controller, once the user is externally authenticated, you use `IdentityOrchestrator` to generate the SecureCore tokens.
-
-```csharp
-[HttpGet("callback-google")]
-public async Task<IResult> GoogleCallback(IdentityOrchestrator orchestrator)
-{
-    // 1. Get the external authentication information from ASP.NET Core
-    var authResult = await HttpContext.AuthenticateAsync("Google");
-    
-    if (!authResult.Succeeded) return Results.Unauthorized();
-
-    // 2. Extract the provider's unique ID (Subject)
-    var providerKey = authResult.Principal.FindFirstValue(ClaimTypes.NameIdentifier);
-    var provider = "Google";
-
-    // 3. Let SecureCore orchestrate the login
-    // It will check if the user is already linked and generate JWT + Refresh Token
-    var (result, tokens) = await orchestrator.SignInExternalAsync(provider, providerKey);
-
-    if (result.Succeeded) return Results.Ok(tokens);
-    
-    // If the user doesn't exist, you can redirect them to a registration page
-    // or create them automatically using the email from Google's claims.
-    return Results.BadRequest(new { error = "user_not_found" });
-}
+#### Step 1: Install the providers you need
+```bash
+dotnet add package SecureCore.Auth.OAuth.Google
+dotnet add package SecureCore.Auth.OAuth.Microsoft
+# ... other providers
 ```
+
+#### Step 2: Configure in Program.cs
+```csharp
+builder.Services.AddSecureAuth(options => { ... })
+    .AddOAuth(oauth => 
+    {
+        oauth.AddGoogle(google => 
+        {
+            google.ClientId = "...";
+            google.ClientSecret = "...";
+        });
+
+        oauth.AddMicrosoft(ms => 
+        {
+            ms.ClientId = "...";
+            ms.ClientSecret = "...";
+            ms.Tenant = "common"; // Or your specific tenant ID
+        });
+        
+        // Enable automatic registration for new users
+        oauth.ConfigureOptions(opts => opts.AllowImplicitRegistration = true);
+    });
+```
+
+#### Step 3: Map Endpoints
+```csharp
+app.MapSecureOAuthEndpoints(); 
+// Automatically creates:
+// GET /auth/oauth/{provider}/authorize  -> Redirects to social login
+// GET /auth/oauth/{provider}/callback   -> Receives code and issues SecureCore JWT
+```
+
+> [!TIP]
+> **Security v2.0**: All OIDC providers (Google, Microsoft, LinkedIn) now cryptographically validate the `nonce` and cache public keys (JWKS) for maximum performance without sacrificing security. Facebook uses `appsecret_proof` (HMAC-SHA256) to protect server-to-server calls.
 
 ---
 
