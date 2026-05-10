@@ -1,7 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
     <RootNamespace>SecureCore.Auth</RootNamespace>
     <AssemblyName>SecureCore.Auth</AssemblyName>
     <Description>Paquete principal (metapaquete) de SecureCore Auth Framework. Proporciona una solución completa de identidad, sesiones y WebAuthn para ASP.NET Core.</Description>

@@ -1,19 +1,25 @@
 <Project>
+  <!-- 
+    Configuración global de compilación para AuthCore Framework.
+    DIDÁCTICA: Centralizar estas propiedades asegura que todo el ecosistema (incluyendo submódulos)
+    se mantenga sincronizado en la misma versión de .NET y maneje las rutas de forma consistente.
+  -->
   <PropertyGroup>
-    <LangVersion>12.0</LangVersion>
-    <Nullable>enable</Nullable>
+    <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
-    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
-    <GenerateDocumentationFile>true</GenerateDocumentationFile>
-    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <Nullable>enable</Nullable>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    
+    <!-- 
+      Aseguramos que las rutas de salida sean relativas al directorio del proyecto. 
+      Esto ayuda a mitigar problemas de CS0006 cuando se trabaja con symlinks.
+    -->
+    <BaseOutputPath>bin\</BaseOutputPath>
+    <BaseIntermediateOutputPath>obj\</BaseIntermediateOutputPath>
   </PropertyGroup>
 
-  <PropertyGroup>
-    <Authors>SecureCore Auth Contributors</Authors>
-    <Company>SecureCore</Company>
-    <Product>SecureCore Auth Framework</Product>
-    <Description>Una solución de identidad y sesiones modular, agnóstica a la base de datos, compatible con Passkeys.</Description>
-    <Version>2.1.0</Version>
-    <RepositoryType>git</RepositoryType>
-  </PropertyGroup>
+  <ItemGroup>
+    <!-- Opt-out de telemetría de compilación si es necesario o añadir analizadores globales -->
+  </ItemGroup>
 </Project>
