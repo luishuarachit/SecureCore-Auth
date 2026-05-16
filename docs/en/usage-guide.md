@@ -696,10 +696,20 @@ builder.Services.AddSecureAuth(options => { ... })
             ms.Tenant = "common"; // Or your specific tenant ID
         });
         
-        // Enable automatic registration for new users
+        // Automatic registration via IExternalUserFactory
+        // If enabled, new users authenticating via OAuth will be created automatically
+        // WITHOUT needing to fill a registration form first.
         oauth.ConfigureOptions(opts => opts.AllowImplicitRegistration = true);
     });
 ```
+
+> [!IMPORTANT]
+> When `AllowImplicitRegistration = true`, you **must** register an implementation of `IExternalUserFactory`
+> to tell the library how to create the user from OAuth data:
+> ```csharp
+> builder.Services.AddScoped<IExternalUserFactory, MyUserFactory>();
+> ```
+> See the `IExternalUserFactory` interface in `SecureCore.Auth.Abstractions.Interfaces`.
 
 #### Step 3: Map Endpoints
 ```csharp
@@ -710,7 +720,7 @@ app.MapSecureOAuthEndpoints();
 ```
 
 > [!TIP]
-> **Security v2.0**: All OIDC providers (Google, Microsoft, LinkedIn) now cryptographically validate the `nonce` and cache public keys (JWKS) for maximum performance without sacrificing security. Facebook uses `appsecret_proof` (HMAC-SHA256) to protect server-to-server calls.
+> **Security v2.3+**: All OIDC providers now validate the `nonce` cryptographically and cache public keys (JWKS) with **auto-retry** on key rotation. If a provider rotates its signing keys (e.g. Google's 24h rotation), the library automatically fetches fresh keys and retries validation before declaring the token invalid — ensuring zero downtime. Facebook uses `appsecret_proof` (HMAC-SHA256) for server-to-server calls.
 
 ---
 

@@ -713,10 +713,21 @@ builder.Services.AddSecureAuth(options => { ... })
             ms.Tenant = "common"; // O tu ID de tenant específico
         });
         
-        // Habilitar registro automático de usuarios nuevos
+        // Registro automático via IExternalUserFactory
+        // Si está habilitado, los usuarios nuevos que se autentiquen via OAuth
+        // se crearán automáticamente SIN necesidad de formulario de registro.
         oauth.ConfigureOptions(opts => opts.AllowImplicitRegistration = true);
     });
 ```
+
+> [!IMPORTANT]
+> Cuando `AllowImplicitRegistration = true`, **debes** registrar una implementación de
+> `IExternalUserFactory` para indicar a la librería cómo crear el usuario desde los
+> datos OAuth:
+> ```csharp
+> builder.Services.AddScoped<IExternalUserFactory, MiUserFactory>();
+> ```
+> Ver la interfaz `IExternalUserFactory` en `SecureCore.Auth.Abstractions.Interfaces`.
 
 #### Paso 3: Mapear Endpoints
 ```csharp
@@ -727,7 +738,7 @@ app.MapSecureOAuthEndpoints();
 ```
 
 > [!TIP]
-> **Seguridad v2.0**: Todos los proveedores OIDC (Google, Microsoft, LinkedIn) ahora validan el `nonce` criptográficamente y cachean las llaves públicas (JWKS) para máximo rendimiento sin sacrificar seguridad. Facebook utiliza `appsecret_proof` (HMAC-SHA256) para proteger las llamadas servidor-servidor.
+> **Seguridad v2.3+**: Todos los proveedores OIDC validan el `nonce` criptográficamente y cachean las llaves públicas (JWKS) con **reintento automático** ante rotación de llaves. Si un proveedor rota sus llaves de firma (ej. la rotación de 24h de Google), la librería descarga llaves frescas y reintenta la validación antes de declarar el token inválido — cero downtime. Facebook usa `appsecret_proof` (HMAC-SHA256) en llamadas servidor-servidor.
 
 ---
 

@@ -156,3 +156,67 @@ The system dispatches asynchronous domain events via `IAuthEventDispatcher`.
 
 ### 6.2. Enumeration Mitigation
 The framework guarantees constant response time on authentication failures by injecting dummy hashing operations when the user is not found in the data store.
+
+---
+
+## 7. OAuth 2.0 / OIDC Ecosystem (v2.0.0)
+
+As of v2.0.0, the framework includes a decoupled external identity validation architecture.
+
+### 7.1. IOAuthProviderValidator
+Interface implemented by all provider validators.
+
+- `Task<OAuthIdentityResult> ValidateIdTokenAsync(string idToken, string? expectedNonce, CancellationToken ct)`
+- `Task<OAuthIdentityResult> ExchangeCodeAsync(string code, string redirectUri, string? expectedNonce, CancellationToken ct)`
+
+### 7.2. Security Mechanisms
+
+| Feature | Purpose | Implementation |
+| :--- | :--- | :--- |
+| **Nonce Enforcement** | Prevents Replay attacks. | Strict validation in OIDC providers (Google, MS, LinkedIn, Apple). |
+| **JWKS Caching + Auto-Retry** | Performance and resilience. | In-memory cache with `SemaphoreSlim` (24h expiry) + auto-retry on `SecurityTokenSignatureKeyNotFoundException` or `SecurityTokenInvalidSignatureException`. |
+| **AppSecret Proof** | Server-to-Server security. | HMAC-SHA256(AccessToken, ClientSecret) for Facebook. |
+| **Dynamic Issuer** | Multi-tenancy. | Prefix/regex validation in Microsoft Entra ID. |
+
+### 7.3. Supported Providers
+
+1. **Google**: OpenID Connect (v2.0).
+2. **Microsoft**: Entra ID (v2.0) with multi-tenant support.
+3. **Facebook**: OAuth 2.0 + Graph API + AppSecret Proof.
+4. **GitHub**: OAuth 2.0 + User Email API.
+5. **LinkedIn**: OpenID Connect.
+6. **TikTok**: OAuth 2.0 (Login Kit V2) with adapted error handling.
+7. **Apple**: Sign In with Apple (OIDC) with dynamic Client Secret generation via **ES256**.
+
+### 7.4. SignIn Result Standardization (v2.4.0)
+
+`OAuthSignInResult` includes a standardized `ErrorCode` property for programmatic error handling:
+
+| ErrorCode | Meaning |
+| :--- | :--- |
+| `oauth_provider_not_configured` | The requested provider is not registered. |
+| `oauth_user_not_found` | User not found and implicit registration is disabled. |
+| `oauth_account_locked` | The account is temporarily locked due to failed attempts. |
+| `oauth_validation_failed` | The ID Token or authorization code validation failed. |
+| `oauth_invalid_request` | The request lacks required fields (IdToken or Code). |
+| `oauth_factory_not_registered` | `AllowImplicitRegistration=true` but `IExternalUserFactory` is missing. |
+
+### 7.5. JWT Claims Protection (v2.4.0)
+
+`JwtTokenService` includes a static `SystemClaims` blocklist that prevents injection of 17 security-sensitive claims from `UserIdentity.Claims`:
+
+- **Identity**: `sub`, `email`, `name`
+- **Token control**: `jti`, `iss`, `aud`, `exp`, `iat`, `nbf`
+- **Security**: `ssv` (SecurityStamp), `nonce`
+- **Authorization**: `role`, `roles`, `auth_time`, `amr`, `acr`, `azp`
+
+Any attempt to override these via `UserIdentity.Claims` is silently ignored.
+
+### 7.6. CI/CD (v2.4.0)
+
+The repository includes a GitHub Actions workflow (`.github/workflows/ci.yml`) that runs on push/PR to `main`:
+- Build (`dotnet build --configuration Release`)
+- Test (`dotnet test --configuration Release`)
+- Format verification (`dotnet format --verify-no-changes`)
+
+Additionally, an `.editorconfig` enforces C# 12 coding conventions: file-scoped namespaces, primary constructors, pattern matching (`is not null`), `sealed` class preference, and `nameof` usage.

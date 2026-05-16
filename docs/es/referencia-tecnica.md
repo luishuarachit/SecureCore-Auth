@@ -173,8 +173,8 @@ Interfaz que deben implementar todos los validadores de proveedores.
 
 | Característica | Propósito | Implementación |
 | :--- | :--- | :--- |
-| **Nonce Enforcement** | Previene ataques de Replay. | Validación estricta en proveedores OIDC (Google, MS, LinkedIn). |
-| **JWKS Caching** | Rendimiento y resiliencia. | Caché en memoria con `SemaphoreSlim` (expiración 24h). |
+| **Nonce Enforcement** | Previene ataques de Replay. | Validación estricta en proveedores OIDC (Google, MS, LinkedIn, Apple). |
+| **JWKS Caching + Auto-Retry** | Rendimiento y resiliencia. | Caché en memoria con `SemaphoreSlim` (expiración 24h) + reintento automático ante `SecurityTokenSignatureKeyNotFoundException` o `SecurityTokenInvalidSignatureException`. |
 | **AppSecret Proof** | Seguridad Servidor-Servidor. | HMAC-SHA256(AccessToken, ClientSecret) en Facebook. |
 | **Issuer Dinámico** | Multi-tenancy. | Validación por regex/prefijo en Microsoft Entra ID. |
 
@@ -187,4 +187,37 @@ Interfaz que deben implementar todos los validadores de proveedores.
 5. **LinkedIn**: OpenID Connect.
 6. **TikTok**: OAuth 2.0 (Login Kit V2) con manejo de errores adaptado.
 7. **Apple**: Sign In with Apple (OIDC) con generación dinámica de Client Secret vía **ES256**.
+
+### 7.4. Estandarización de Resultados SignIn (v2.4.0)
+
+`OAuthSignInResult` incluye una propiedad `ErrorCode` estandarizada para manejo programático de errores:
+
+| ErrorCode | Significado |
+| :--- | :--- |
+| `oauth_provider_not_configured` | El proveedor solicitado no está registrado. |
+| `oauth_user_not_found` | Usuario no encontrado y registro implícito deshabilitado. |
+| `oauth_account_locked` | La cuenta está bloqueada temporalmente por intentos fallidos. |
+| `oauth_validation_failed` | La validación del ID Token o código de autorización falló. |
+| `oauth_invalid_request` | La solicitud carece de campos requeridos (IdToken o Code). |
+| `oauth_factory_not_registered` | `AllowImplicitRegistration=true` pero falta `IExternalUserFactory`. |
+
+### 7.5. Protección de Claims JWT (v2.4.0)
+
+`JwtTokenService` incluye un blocklist estático `SystemClaims` que previene la inyección de 17 claims sensibles desde `UserIdentity.Claims`:
+
+- **Identidad**: `sub`, `email`, `name`
+- **Control de token**: `jti`, `iss`, `aud`, `exp`, `iat`, `nbf`
+- **Seguridad**: `ssv` (SecurityStamp), `nonce`
+- **Autorización**: `role`, `roles`, `auth_time`, `amr`, `acr`, `azp`
+
+Cualquier intento de sobrescribir estos claims via `UserIdentity.Claims` es ignorado silenciosamente.
+
+### 7.6. CI/CD (v2.4.0)
+
+El repositorio incluye un flujo de GitHub Actions (`.github/workflows/ci.yml`) que se ejecuta en push/PR a `main`:
+- Compilación (`dotnet build --configuration Release`)
+- Pruebas (`dotnet test --configuration Release`)
+- Verificación de formato (`dotnet format --verify-no-changes`)
+
+Adicionalmente, un `.editorconfig` aplica convenciones de estilo C# 12: namespaces file-scoped, primary constructors, pattern matching (`is not null`), preferencia por `sealed class`, y uso de `nameof`.
 
