@@ -1,0 +1,97 @@
+He revisado todos los archivos fuente del proyecto. Aquí está el análisis completo:
+Auditoría SecureCore Auth Framework
+1. Código, Buenas Prácticas y Coherencia
+Puntos Fuertes
+-
+Arquitectura modular limpia (Abstractions → Core → ASP.NET → Providers)
+-
+Uso correcto de C# 12: primary constructors, required, record, sealed
+-
+Nullable habilitado globalmente, AnalysisLevel=latest
+-
+CancellationToken propagado correctamente
+-
+DTOs inmutables (record), DI con ciclo de vida adecuado
+-
+Documentación XML muy completa y didáctica
+Problemas Identificados
+#	Archivo	Problema
+1	src/SecureCore.Auth.OAuth.GitHub/Class1.cs	Archivo muerto (class Class1 {}) — debe eliminarse
+2	OAuthOrchestrator.cs:67-69	Bug crítico: cuando AllowImplicitRegistration=true y user is null, retorna error en vez de llamar a IExternalUserFactory.CreateFromOAuthAsync(). El factory NUNCA se invoca → el registro implícito OAuth no funciona
+3	PasswordResetOrchestrator.cs:43	Cuando user is null, llama a CreateUrlSafeCSPRNGToken() sin asignar el resultado — operación costosa e inútil
+4	JwtTokenService.cs:42-52	Duplica claims: pone sub y email tanto en Subject como en Claims → JWT genera claims duplicados
+5	Validadores OAuth	_keysCache + _cacheLock estáticos en Google, Microsoft, LinkedIn, Apple — mutable state estático en lugar de Lazy<T> o ConcurrentDictionary
+6	Varios archivos	Inconsistencia entre DateTime.UtcNow y DateTimeOffset.UtcNow — ambos se usan de forma intercambiable
+7	SecureAuthOptions.ClockSkew	Definido en Options pero nunca se usa en el JwtTokenService (el middleware JWT sí lo usa, el generador no)
+8	Argon2PasswordHasher.cs	Argon2Params es struct mutable con campos públicos en vez de readonly record struct
+9	UserIdentity.Claims	Dictionary<string, string>? se vuelca directly al JWT sin validación — posible inyección de claims
+2. Auditoría de Seguridad
+Fortalezas
+-
+✅ Argon2id como password hasher — estándar de oro
+-
+✅ CryptographicOperations.FixedTimeEquals para comparación en tiempo constante
+-
+✅ VerifyDummyPassword contra enumeración por timing
+-
+✅ Refresh Token Rotation (RTR) con revocación por familia + grace period
+-
+✅ Security Stamp (ssv) con caché distribuida para revocación global
+-
+✅ Validación criptográfica JWKS en Google, Microsoft, LinkedIn, Apple
+-
+✅ appsecret_proof HMAC en Facebook
+-
+✅ Nonce anti-replay en OIDC
+-
+✅ Endpoint /forgot-password siempre retorna 200 (previene enumeración de emails)
+-
+✅ Rate limiting en password reset
+-
+✅ RandomNumberGenerator para todo secreto criptográfico
+-
+✅ Minimo de 32 chars en SigningKey
+Vulnerabilidades y Riesgos
+#	Severidad	Archivo
+1	CRÍTICO	OAuthOrchestrator.cs:67-69
+2	CRÍTICO	Google/Microsoft/LinkedIn/Apple validators
+3	ALTO	GitHubOAuthValidator.cs:161-166
+4	MEDIO	ServiceCollectionExtensions.cs:96-99
+5	MEDIO	IdentityOrchestrator.cs:33
+6	MEDIO	PasswordResetOrchestrator.cs:62-67
+7	BAJO	JwtTokenService.cs:59-61
+8	BAJO	OAuthOrchestrator.cs:72
+3. Aspectos a Mejorar (Priorizados)
+Inmediatos (P1)
+1.
+Corregir OAuthOrchestrator.SignInOrRegisterAsync — debe instanciar el IExternalUserFactory desde DI (cuando AllowImplicitRegistration=true) y llamar a CreateFromOAuthAsync() en vez de retornar error
+2.
+Eliminar src/SecureCore.Auth.OAuth.GitHub/Class1.cs
+3.
+Implementar JWKS refresh on failure — si ValidateToken falla con las keys cacheadas, reintentar descargando las keys frescas antes de declarar el token inválido
+Corto plazo (P2)
+4.
+Migrar estáticos mutables — _keysCache + _cacheLock → ConcurrentDictionary<string, Lazy<(JsonWebKeySet, DateTime)>> en cada validador
+5.
+Unificar DateTime — usar DateTimeOffset.UtcNow en todo el codebase (es el estándar moderno .NET)
+6.
+Normalizar email centralizadamente — crear un helper estático EmailNormalizer.Normalize(string) y usarlo en IdentityOrchestrator y dejar claro el contrato en IUserStore.FindByEmailAsync
+7.
+Invertir orden en Password Reset — almacenar token después de enviar email (o hacerlo transaccional)
+Mediano plazo (P3)
+ 8.
+Remover claims duplicados en JwtTokenService.GenerateAccessToken
+ 9.
+Considerar Lazy<T> en vez de SemaphoreSlim para el JWKS cache
+10.
+Agregar más tests de integración — actualmente solo hay tests unitarios; faltan tests del pipeline OAuth completo
+11.
+Agregar archivo de CI/CD (GitHub Actions) y configuración de analyzers/formatting
+12.
+Validar claims de JWT — UserIdentity.Claims debería tener un allowlist o sanitización para evitar claims no esperados
+13.
+Agregar un OAuthSignInResult para ProviderNotConfigured que incluya un código de error estandarizado (ya existe el método estático)
+14.
+Considerar Microsoft.IdentityModel.JsonWebTokens en todos los validadores (Google y LinkedIn usan el legacy System.IdentityModel.Tokens.Jwt)
+Observaciones finales
+El framework está muy bien diseñado en términos de arquitectura y sigue principios SOLID. Las interfaces están bien abstraídas. Los mayores problemas son el bug del OAuthOrchestrator (que hace que AllowImplicitRegistration no funcione) y la cache de JWKS sin fallback (que puede causar outages de hasta 24h si los proveedores rotan llaves). Son issues puntuales, no estructurales.

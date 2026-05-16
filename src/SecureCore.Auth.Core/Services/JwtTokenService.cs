@@ -36,6 +36,31 @@ public sealed class JwtTokenService(
     private readonly JwtOptions _jwtOptions = jwtOptions.Value;
     private readonly SecureAuthOptions _authOptions = authOptions.Value;
 
+    // DIDÁCTICA: Conjunto de claims que el sistema gestiona internamente y no deben
+    // ser inyectados desde UserIdentity.Claims. Cualquier intento de sobrescribirlos
+    // se ignora silenciosamente para evitar suplantación, escalación de privilegios
+    // o bypass de mecanismos de seguridad como el SecurityStamp.
+    private static readonly HashSet<string> SystemClaims =
+    [
+        JwtRegisteredClaimNames.Sub,
+        JwtRegisteredClaimNames.Email,
+        JwtRegisteredClaimNames.Jti,
+        JwtRegisteredClaimNames.Iss,
+        JwtRegisteredClaimNames.Aud,
+        JwtRegisteredClaimNames.Exp,
+        JwtRegisteredClaimNames.Iat,
+        JwtRegisteredClaimNames.Nbf,
+        JwtRegisteredClaimNames.Name,
+        "ssv",
+        "role",
+        "roles",
+        "auth_time",
+        "amr",
+        "acr",
+        "azp",
+        "nonce",
+    ];
+
     /// <inheritdoc />
     public Task<TokenResponse> GenerateTokenPairAsync(
         UserIdentity user,
@@ -61,14 +86,16 @@ public sealed class JwtTokenService(
             Encoding.UTF8.GetBytes(_jwtOptions.SigningKey));
         var credentials = new SigningCredentials(securityKey, _jwtOptions.Algorithm);
 
-        // Definimos los claims del token
         // DIDÁCTICA: Los claims son "afirmaciones" sobre el usuario que el servidor
         // incluye en el token. El cliente puede leerlos, pero no modificarlos
         // sin invalidar la firma.
+        //
+        // Los claims 'sub' y 'email' se definen en Subject (líneas abajo) y NO deben
+        // repetirse en el diccionario Claims, porque el handler los mergea y genera
+        // claims duplicados en el JWT. Algunos parsers del lado cliente pueden
+        // comportarse de forma impredecible con claims duplicados.
         var claims = new Dictionary<string, object>
         {
-            [JwtRegisteredClaimNames.Sub] = user.Id,
-            [JwtRegisteredClaimNames.Email] = user.Email,
             [JwtRegisteredClaimNames.Jti] = Guid.NewGuid().ToString(),
             // ssv = Security Stamp Version: claim personalizado para revocación global
             ["ssv"] = user.SecurityStamp
@@ -80,12 +107,21 @@ public sealed class JwtTokenService(
             claims[JwtRegisteredClaimNames.Name] = user.DisplayName;
         }
 
-        // Si hay claims adicionales, los incluimos
+        // Si hay claims adicionales definidos por el implementador, los incluimos
+        // con protección contra inyección de claims sensibles del sistema.
         if (user.Claims != null)
         {
             foreach (var kv in user.Claims)
             {
-                claims[kv.Key] = kv.Value;
+                // DIDÁCTICA: Bloqueamos explícitamente claims que el sistema ya gestiona
+                // o que son críticos de seguridad. Esto evita que un implementador
+                // (o un atacante que comprometa el UserStore) pueda inyectar claims
+                // como 'sub' (suplantación de identidad), 'role' (escalación de
+                // privilegios) o 'ssv' (bypass de revocación global).
+                if (!SystemClaims.Contains(kv.Key))
+                {
+                    claims[kv.Key] = kv.Value;
+                }
             }
         }
 

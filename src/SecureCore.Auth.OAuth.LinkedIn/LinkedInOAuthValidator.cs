@@ -50,42 +50,21 @@ public class LinkedInOAuthValidator : IOAuthProviderValidator
     {
         try
         {
-            var keys = await GetSigningKeysAsync(cancellationToken);
-
-            var validationParameters = new TokenValidationParameters
+            return await ValidateIdTokenCoreAsync(idToken, expectedNonce, cancellationToken);
+        }
+        catch (Exception ex) when (ex is SecurityTokenSignatureKeyNotFoundException
+                                or SecurityTokenInvalidSignatureException)
+        {
+            var freshKeys = await GetSigningKeysAsync(cancellationToken, forceRefresh: true);
+            try
             {
-                ValidateIssuer = true,
-                ValidIssuer = "https://www.linkedin.com",
-                ValidateAudience = true,
-                ValidAudience = _options.ClientId,
-                ValidateLifetime = true,
-                IssuerSigningKeys = keys,
-                ClockSkew = TimeSpan.FromMinutes(5)
-            };
-
-            var principal = _tokenHandler.ValidateToken(idToken, validationParameters, out var validatedToken);
-            var jwt = (JwtSecurityToken)validatedToken;
-
-            // Validación de Nonce
-            if (expectedNonce is not null)
-            {
-                var tokenNonce = jwt.Claims.FirstOrDefault(c => c.Type == "nonce")?.Value;
-                if (tokenNonce != expectedNonce)
-                {
-                    return OAuthIdentityResult.Failure("invalid_nonce", "Nonce mismatch.");
-                }
+                return await ValidateTokenWithKeysAsync(idToken, expectedNonce, freshKeys, cancellationToken);
             }
-
-            return new OAuthIdentityResult
+            catch (Exception innerEx)
             {
-                Succeeded = true,
-                ProviderKey = principal.FindFirst("sub")?.Value,
-                Email = principal.FindFirst("email")?.Value,
-                DisplayName = principal.FindFirst("name")?.Value,
-                AvatarUrl = principal.FindFirst("picture")?.Value,
-                EmailVerified = true,
-                IdToken = idToken
-            };
+                return OAuthIdentityResult.Failure("validation_error",
+                    $"Falló incluso con llaves frescas: {innerEx.Message}");
+            }
         }
         catch (Exception ex)
         {
@@ -93,19 +72,70 @@ public class LinkedInOAuthValidator : IOAuthProviderValidator
         }
     }
 
-    private async Task<IEnumerable<SecurityKey>> GetSigningKeysAsync(CancellationToken ct)
+    private async Task<OAuthIdentityResult> ValidateIdTokenCoreAsync(
+        string idToken, string? expectedNonce, CancellationToken cancellationToken)
     {
+        var keys = await GetSigningKeysAsync(cancellationToken);
+        return await ValidateTokenWithKeysAsync(idToken, expectedNonce, keys, cancellationToken);
+    }
+
+    private async Task<OAuthIdentityResult> ValidateTokenWithKeysAsync(
+        string idToken, string? expectedNonce, IEnumerable<SecurityKey> keys, CancellationToken cancellationToken)
+    {
+        var validationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = "https://www.linkedin.com",
+            ValidateAudience = true,
+            ValidAudience = _options.ClientId,
+            ValidateLifetime = true,
+            IssuerSigningKeys = keys,
+            ClockSkew = TimeSpan.FromMinutes(5)
+        };
+
+        var principal = _tokenHandler.ValidateToken(idToken, validationParameters, out var validatedToken);
+        var jwt = (JwtSecurityToken)validatedToken;
+
+        // Validación de Nonce
+        if (expectedNonce is not null)
+        {
+            var tokenNonce = jwt.Claims.FirstOrDefault(c => c.Type == "nonce")?.Value;
+            if (tokenNonce != expectedNonce)
+            {
+                return OAuthIdentityResult.Failure("invalid_nonce", "Nonce mismatch.");
+            }
+        }
+
+        return new OAuthIdentityResult
+        {
+            Succeeded = true,
+            ProviderKey = principal.FindFirst("sub")?.Value,
+            Email = principal.FindFirst("email")?.Value,
+            DisplayName = principal.FindFirst("name")?.Value,
+            AvatarUrl = principal.FindFirst("picture")?.Value,
+            EmailVerified = true,
+            IdToken = idToken
+        };
+    }
+
+    private async Task<IEnumerable<SecurityKey>> GetSigningKeysAsync(CancellationToken ct, bool forceRefresh = false)
+    {
+        if (!forceRefresh && _keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
+        {
+            return _keysCache.Value.Keys.GetSigningKeys();
+        }
+
         await _cacheLock.WaitAsync(ct);
         try
         {
-            if (_keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
+            if (!forceRefresh && _keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
             {
                 return _keysCache.Value.Keys.GetSigningKeys();
             }
 
             var response = await _httpClient.GetStringAsync(JwksUri, ct);
             var jwks = new JsonWebKeySet(response);
-            
+
             _keysCache = (jwks, DateTime.UtcNow.AddHours(24));
             return jwks.GetSigningKeys();
         }

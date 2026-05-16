@@ -30,7 +30,10 @@ public class GoogleOAuthValidator : IOAuthProviderValidator
     private readonly HttpClient _httpClient;
     private readonly JwtSecurityTokenHandler _tokenHandler = new();
 
-    // Caché de llaves de Google (rotan con menos frecuencia que las de MS, pero seguimos el mismo estándar)
+    // DIDÁCTICA: Caché estática de llaves JWKS compartida entre todas las instancias.
+    // Usamos SemaphoreSlim (no lock) porque GetSigningKeysAsync es async.
+    // El patrón con tuple nullable + pattern matching moderno (_cache is { Expiry: var exp })
+    // es más legible y seguro que el clásico _cache.HasValue.
     private static (JsonWebKeySet Keys, DateTime Expiry)? _keysCache;
     private static readonly SemaphoreSlim _cacheLock = new(1, 1);
 
@@ -52,50 +55,39 @@ public class GoogleOAuthValidator : IOAuthProviderValidator
     /// 2. Verifica la firma (firma digital RS256).
     /// 3. Valida la audiencia (que sea para nuestro ClientId).
     /// 4. Valida el 'nonce' para prevenir ataques de repetición.
+    ///
+    /// DIDÁCTICA (Key Rotation Resilience):
+    /// Los proveedores OIDC como Google rotan sus llaves de firma JWKS periódicamente
+    /// y también en caso de compromiso de seguridad. Si la validación falla porque
+    /// la llave indicada en el JWT (por su 'kid') no está en nuestra caché, o porque
+    /// la firma no corresponde, este método invalida automáticamente la caché y
+    /// reintenta descargando las llaves frescas. Esto asegura que nuestra aplicación
+    /// se recupere automáticamente de rotaciones de llave sin intervención manual
+    /// y sin interrupción del servicio.
     /// </summary>
     public async Task<OAuthIdentityResult> ValidateIdTokenAsync(string idToken, string? expectedNonce = null, CancellationToken cancellationToken = default)
     {
         try
         {
-            var keys = await GetSigningKeysAsync(cancellationToken);
-
-            var validationParameters = new TokenValidationParameters
+            return await ValidateIdTokenCoreAsync(idToken, expectedNonce, cancellationToken);
+        }
+        catch (Exception ex) when (ex is SecurityTokenSignatureKeyNotFoundException
+                                or SecurityTokenInvalidSignatureException)
+        {
+            // DIDÁCTICA: La validación falló con llaves cacheadas — probablemente el
+            // proveedor rotó sus llaves. Invalidamos la caché y reintentamos UNA vez
+            // con llaves recién descargadas. Si el segundo intento también falla,
+            // entonces el token es genuinamente inválido.
+            var freshKeys = await GetSigningKeysAsync(cancellationToken, forceRefresh: true);
+            try
             {
-                ValidateIssuer = true,
-                ValidIssuers = new[] { "https://accounts.google.com", "accounts.google.com" },
-                ValidateAudience = true,
-                ValidAudience = _options.ClientId,
-                ValidateLifetime = true,
-                IssuerSigningKeys = keys,
-                ClockSkew = TimeSpan.FromMinutes(5)
-            };
-
-            var principal = _tokenHandler.ValidateToken(idToken, validationParameters, out var validatedToken);
-            var jwt = (JwtSecurityToken)validatedToken;
-
-            // Validación de Nonce para prevenir ataques de repetición
-            if (expectedNonce is not null)
-            {
-                var tokenNonce = jwt.Claims.FirstOrDefault(c => c.Type == "nonce")?.Value;
-                if (tokenNonce != expectedNonce)
-                {
-                    return OAuthIdentityResult.Failure("invalid_nonce", "Security threat: Nonce mismatch.");
-                }
+                return await ValidateTokenWithKeysAsync(idToken, expectedNonce, freshKeys, cancellationToken);
             }
-
-            var emailVerifiedStr = principal.FindFirst("email_verified")?.Value;
-            bool.TryParse(emailVerifiedStr, out var emailVerified);
-
-            return new OAuthIdentityResult
+            catch (Exception innerEx)
             {
-                Succeeded = true,
-                ProviderKey = principal.FindFirst("sub")?.Value,
-                Email = principal.FindFirst("email")?.Value,
-                DisplayName = principal.FindFirst("name")?.Value,
-                AvatarUrl = principal.FindFirst("picture")?.Value,
-                EmailVerified = emailVerified,
-                IdToken = idToken
-            };
+                return OAuthIdentityResult.Failure("validation_error",
+                    $"Falló incluso con llaves frescas: {innerEx.Message}");
+            }
         }
         catch (Exception ex)
         {
@@ -103,19 +95,109 @@ public class GoogleOAuthValidator : IOAuthProviderValidator
         }
     }
 
-    private async Task<IEnumerable<SecurityKey>> GetSigningKeysAsync(CancellationToken ct)
+    /// <summary>
+    /// Ejecuta el núcleo de la validación del ID Token usando las llaves proporcionadas.
+    /// Separado del método público para poder reintentar la validación con llaves
+    /// frescas sin duplicar lógica.
+    /// </summary>
+    private async Task<OAuthIdentityResult> ValidateIdTokenCoreAsync(
+        string idToken, string? expectedNonce, CancellationToken cancellationToken)
     {
+        var keys = await GetSigningKeysAsync(cancellationToken);
+        return await ValidateTokenWithKeysAsync(idToken, expectedNonce, keys, cancellationToken);
+    }
+
+    /// <summary>
+    /// Valida un ID Token contra un conjunto específico de llaves de firma.
+    /// Este método contiene la lógica pura de validación OIDC, reutilizable
+    /// tanto para el primer intento (con caché) como para el reintento (con llaves frescas).
+    /// </summary>
+    private async Task<OAuthIdentityResult> ValidateTokenWithKeysAsync(
+        string idToken, string? expectedNonce, IEnumerable<SecurityKey> keys, CancellationToken cancellationToken)
+    {
+        var validationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuers = new[] { "https://accounts.google.com", "accounts.google.com" },
+            ValidateAudience = true,
+            ValidAudience = _options.ClientId,
+            ValidateLifetime = true,
+            IssuerSigningKeys = keys,
+            ClockSkew = TimeSpan.FromMinutes(5)
+        };
+
+        var principal = _tokenHandler.ValidateToken(idToken, validationParameters, out var validatedToken);
+        var jwt = (JwtSecurityToken)validatedToken;
+
+        // Validación de Nonce para prevenir ataques de repetición
+        if (expectedNonce is not null)
+        {
+            var tokenNonce = jwt.Claims.FirstOrDefault(c => c.Type == "nonce")?.Value;
+            if (tokenNonce != expectedNonce)
+            {
+                return OAuthIdentityResult.Failure("invalid_nonce", "Security threat: Nonce mismatch.");
+            }
+        }
+
+        var emailVerifiedStr = principal.FindFirst("email_verified")?.Value;
+        bool.TryParse(emailVerifiedStr, out var emailVerified);
+
+        return new OAuthIdentityResult
+        {
+            Succeeded = true,
+            ProviderKey = principal.FindFirst("sub")?.Value,
+            Email = principal.FindFirst("email")?.Value,
+            DisplayName = principal.FindFirst("name")?.Value,
+            AvatarUrl = principal.FindFirst("picture")?.Value,
+            EmailVerified = emailVerified,
+            IdToken = idToken
+        };
+    }
+
+    /// <summary>
+    /// Obtiene las llaves de firma de Google, con caché y soporte para refresh forzado.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: Usamos SemaphoreSlim para proteger la caché estática compartida entre
+    /// todas las instancias del validador. Esto es seguro en escenarios multi-thread
+    /// (ASP.NET Core atiende cientos de requests concurrentes).
+    ///
+    /// El patrón de doble comprobación (double-checked locking) minimiza la contención:
+    ///   1. Sin bloqueo: verificamos si la caché es válida (lectura rápida).
+    ///   2. Con bloqueo: si está expirada/inválida, descargamos las llaves una sola vez.
+    ///
+    /// El parámetro forceRefresh permite invalidar la caché cuando detectamos una
+    /// posible rotación de llaves durante la validación de un token (ver retry en
+    /// <see cref="ValidateIdTokenAsync"/>).
+    /// </remarks>
+    private async Task<IEnumerable<SecurityKey>> GetSigningKeysAsync(CancellationToken ct, bool forceRefresh = false)
+    {
+        // DIDÁCTICA: Double-checked locking. Primera verificación SIN bloqueo para
+        // el caso común (caché válida). Esto evita contención de SemaphoreSlim
+        // en el 99.9% de las requests.
+        if (!forceRefresh && _keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
+        {
+            return _keysCache.Value.Keys.GetSigningKeys();
+        }
+
         await _cacheLock.WaitAsync(ct);
         try
         {
-            if (_keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
+            // Segunda verificación CON bloqueo: otro thread pudo haber actualizado
+            // la caché mientras esperábamos el lock.
+            if (!forceRefresh && _keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
             {
                 return _keysCache.Value.Keys.GetSigningKeys();
             }
 
             var response = await _httpClient.GetStringAsync(JwksUri, ct);
             var jwks = new JsonWebKeySet(response);
-            
+
+            // DIDÁCTICA: Las llaves JWKS se cachean por 24 horas como estándar de la industria.
+            // Google publica sus llaves con una rotación predecible (~24h), pero puede rotarlas
+            // antes por razones de seguridad. El reintento automático en ValidateIdTokenAsync
+            // nos protege contra rotaciones no programadas sin perder el beneficio de rendimiento
+            // de la caché en el 99.9% de los casos.
             _keysCache = (jwks, DateTime.UtcNow.AddHours(24));
             return jwks.GetSigningKeys();
         }

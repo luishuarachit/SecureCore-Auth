@@ -57,59 +57,31 @@ public class MicrosoftOAuthValidator : IOAuthProviderValidator
     /// Valida un ID Token de Microsoft.
     /// Nota especial: Microsoft usa issuers dinámicos con el ID del tenant.
     /// Implementamos una validación flexible que asegura que el token venga de login.microsoftonline.com.
+    ///
+    /// DIDÁCTICA (Key Rotation Resilience):
+    /// Microsoft Entra ID rota sus llaves de firma periódicamente. Si la validación falla
+    /// por firma inválida o llave no encontrada, este método invalida automáticamente la
+    /// caché JWKS y reintenta con llaves frescas, asegurando cero downtime ante rotaciones.
     /// </summary>
     public async Task<OAuthIdentityResult> ValidateIdTokenAsync(string idToken, string? expectedNonce = null, CancellationToken cancellationToken = default)
     {
         try
         {
-            var keys = await GetSigningKeysAsync(cancellationToken);
-
-            var validationParameters = new TokenValidationParameters
+            return await ValidateIdTokenCoreAsync(idToken, expectedNonce, cancellationToken);
+        }
+        catch (Exception ex) when (ex is SecurityTokenSignatureKeyNotFoundException
+                                or SecurityTokenInvalidSignatureException)
+        {
+            var freshKeys = await GetSigningKeysAsync(cancellationToken, forceRefresh: true);
+            try
             {
-                ValidateAudience = true,
-                ValidAudience = _options.ClientId,
-                ValidateLifetime = true,
-                IssuerSigningKeys = keys,
-                ClockSkew = TimeSpan.FromMinutes(5),
-                
-                // Lógica de Validación de Issuer para Microsoft
-                ValidateIssuer = true,
-                IssuerValidator = (issuer, token, parameters) =>
-                {
-                    // En Entra ID v2.0, el issuer es https://login.microsoftonline.com/{tenantid}/v2.0
-                    if (issuer.StartsWith("https://login.microsoftonline.com/") && issuer.EndsWith("/v2.0"))
-                    {
-                        return issuer;
-                    }
-                    throw new SecurityTokenInvalidIssuerException($"Invalid issuer: {issuer}");
-                }
-            };
-
-            var principal = _tokenHandler.ValidateToken(idToken, validationParameters, out var validatedToken);
-            var jwtToken = (JwtSecurityToken)validatedToken;
-
-            // Validación de Nonce (Requerido por Microsoft en OIDC)
-            if (!string.IsNullOrEmpty(expectedNonce))
-            {
-                var tokenNonce = jwtToken.Payload.ContainsKey("nonce") ? jwtToken.Payload["nonce"].ToString() : null;
-                if (tokenNonce != expectedNonce)
-                    return OAuthIdentityResult.Failure("invalid_nonce", "Nonce mismatch for security.");
+                return await ValidateTokenWithKeysAsync(idToken, expectedNonce, freshKeys, cancellationToken);
             }
-
-            // Microsoft recomienda usar 'preferred_username' para el email en v2.0
-            var email = principal.FindFirst("preferred_username")?.Value 
-                     ?? principal.FindFirst(ClaimTypes.Email)?.Value 
-                     ?? principal.FindFirst("email")?.Value;
-
-            return new OAuthIdentityResult
+            catch (Exception innerEx)
             {
-                Succeeded = true,
-                ProviderKey = jwtToken.Subject, // OID o Sub
-                Email = email,
-                DisplayName = principal.FindFirst("name")?.Value,
-                EmailVerified = true,
-                IdToken = idToken
-            };
+                return OAuthIdentityResult.Failure("validation_error",
+                    $"Falló incluso con llaves frescas: {innerEx.Message}");
+            }
         }
         catch (Exception ex)
         {
@@ -117,12 +89,75 @@ public class MicrosoftOAuthValidator : IOAuthProviderValidator
         }
     }
 
-    private async Task<IEnumerable<SecurityKey>> GetSigningKeysAsync(CancellationToken ct)
+    private async Task<OAuthIdentityResult> ValidateIdTokenCoreAsync(
+        string idToken, string? expectedNonce, CancellationToken cancellationToken)
     {
+        var keys = await GetSigningKeysAsync(cancellationToken);
+        return await ValidateTokenWithKeysAsync(idToken, expectedNonce, keys, cancellationToken);
+    }
+
+    private async Task<OAuthIdentityResult> ValidateTokenWithKeysAsync(
+        string idToken, string? expectedNonce, IEnumerable<SecurityKey> keys, CancellationToken cancellationToken)
+    {
+        var validationParameters = new TokenValidationParameters
+        {
+            ValidateAudience = true,
+            ValidAudience = _options.ClientId,
+            ValidateLifetime = true,
+            IssuerSigningKeys = keys,
+            ClockSkew = TimeSpan.FromMinutes(5),
+
+            // Lógica de Validación de Issuer para Microsoft
+            ValidateIssuer = true,
+            IssuerValidator = (issuer, token, parameters) =>
+            {
+                // En Entra ID v2.0, el issuer es https://login.microsoftonline.com/{tenantid}/v2.0
+                if (issuer.StartsWith("https://login.microsoftonline.com/") && issuer.EndsWith("/v2.0"))
+                {
+                    return issuer;
+                }
+                throw new SecurityTokenInvalidIssuerException($"Invalid issuer: {issuer}");
+            }
+        };
+
+        var principal = _tokenHandler.ValidateToken(idToken, validationParameters, out var validatedToken);
+        var jwtToken = (JwtSecurityToken)validatedToken;
+
+        // Validación de Nonce (Requerido por Microsoft en OIDC)
+        if (!string.IsNullOrEmpty(expectedNonce))
+        {
+            var tokenNonce = jwtToken.Payload.ContainsKey("nonce") ? jwtToken.Payload["nonce"].ToString() : null;
+            if (tokenNonce != expectedNonce)
+                return OAuthIdentityResult.Failure("invalid_nonce", "Nonce mismatch for security.");
+        }
+
+        // Microsoft recomienda usar 'preferred_username' para el email en v2.0
+        var email = principal.FindFirst("preferred_username")?.Value
+                 ?? principal.FindFirst(ClaimTypes.Email)?.Value
+                 ?? principal.FindFirst("email")?.Value;
+
+        return new OAuthIdentityResult
+        {
+            Succeeded = true,
+            ProviderKey = jwtToken.Subject, // OID o Sub
+            Email = email,
+            DisplayName = principal.FindFirst("name")?.Value,
+            EmailVerified = true,
+            IdToken = idToken
+        };
+    }
+
+    private async Task<IEnumerable<SecurityKey>> GetSigningKeysAsync(CancellationToken ct, bool forceRefresh = false)
+    {
+        if (!forceRefresh && _keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
+        {
+            return _keysCache.Value.Keys.GetSigningKeys();
+        }
+
         await _cacheLock.WaitAsync(ct);
         try
         {
-            if (_keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
+            if (!forceRefresh && _keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
             {
                 return _keysCache.Value.Keys.GetSigningKeys();
             }

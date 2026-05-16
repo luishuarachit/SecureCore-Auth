@@ -103,6 +103,12 @@ public class OAuthSignInOptions
 /// <summary>
 /// Resultado de un proceso de SignIn or Register mediante OAuth.
 /// </summary>
+/// <remarks>
+/// DIDÁCTICA: Cada fallo incluye un ErrorCode estandarizado (sin espacios, estilo
+/// snake_case) que permite al consumidor manejar el error programáticamente sin
+/// tener que parsear el mensaje de texto. Los ErrorCode siguen el formato
+/// "proveedor_código" (ej. "oauth_provider_not_configured", "oauth_user_not_found").
+/// </remarks>
 public record OAuthSignInResult
 {
     public bool Succeeded { get; init; }
@@ -111,19 +117,20 @@ public record OAuthSignInResult
     public bool IsNewUser { get; init; }
     public bool IsLockedOut { get; init; }
     public string? ErrorMessage { get; init; }
+    public string? ErrorCode { get; init; }
 
     public static OAuthSignInResult Success(TokenResponse tokens, string userId, bool isNewUser) =>
         new() { Succeeded = true, Tokens = tokens, UserId = userId, IsNewUser = isNewUser };
-        
-    public static OAuthSignInResult Failure(string message) =>
-        new() { Succeeded = false, ErrorMessage = message };
-        
+
+    public static OAuthSignInResult Failure(string message, string? errorCode = null) =>
+        new() { Succeeded = false, ErrorMessage = message, ErrorCode = errorCode };
+
     public static OAuthSignInResult ProviderNotConfigured(string provider) =>
-        new() { Succeeded = false, ErrorMessage = $"Provider '{provider}' is not configured." };
-        
+        new() { Succeeded = false, ErrorMessage = $"Provider '{provider}' is not configured.", ErrorCode = "oauth_provider_not_configured" };
+
     public static OAuthSignInResult LockedOutResult() =>
-        new() { Succeeded = false, IsLockedOut = true, ErrorMessage = "User is locked out." };
-        
+        new() { Succeeded = false, IsLockedOut = true, ErrorMessage = "User is locked out.", ErrorCode = "oauth_account_locked" };
+
     public static OAuthSignInResult UserNotFoundResult() =>
-        new() { Succeeded = false, ErrorMessage = "User not found and implicit registration is disabled." };
+        new() { Succeeded = false, ErrorMessage = "User not found and implicit registration is disabled.", ErrorCode = "oauth_user_not_found" };
 }

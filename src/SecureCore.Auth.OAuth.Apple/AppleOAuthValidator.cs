@@ -51,72 +51,97 @@ public class AppleOAuthValidator : IOAuthProviderValidator
     {
         try
         {
-            var keys = await GetSigningKeysAsync(cancellationToken);
-
-            var validationParameters = new TokenValidationParameters
+            return await ValidateIdTokenCoreAsync(idToken, expectedNonce, cancellationToken);
+        }
+        catch (Exception ex) when (ex is SecurityTokenSignatureKeyNotFoundException
+                                or SecurityTokenInvalidSignatureException)
+        {
+            var freshKeys = await GetSigningKeysAsync(cancellationToken, forceRefresh: true);
+            try
             {
-                ValidateIssuer = true,
-                ValidIssuer = Issuer,
-                ValidateAudience = true,
-                ValidAudience = _options.ClientId,
-                ValidateLifetime = true,
-                IssuerSigningKeys = keys,
-                ClockSkew = TimeSpan.FromMinutes(5)
-            };
-
-            var principal = _tokenHandler.ValidateToken(idToken, validationParameters, out var validatedToken);
-            var jwt = (JwtSecurityToken)validatedToken;
-
-            // [SEC-01] Validación de Nonce — CRÍTICO:
-            // Apple NO almacena el nonce en texto plano en el id_token.
-            // Almacena el hash SHA-256 del nonce original codificado en base64url (sin padding).
-            // La comparación directa con el nonce original SIEMPRE fallaría.
-            if (expectedNonce is not null)
-            {
-                var tokenNonce = jwt.Claims.FirstOrDefault(c => c.Type == "nonce")?.Value;
-                var nonceSupported = jwt.Claims.FirstOrDefault(c => c.Type == "nonce_supported")?.Value;
-
-                // Si Apple indica que nonce_supported es false, no validamos el nonce
-                // (Apple no lo procesó). Solo validamos si está presente o supported == true.
-                bool shouldValidateNonce = nonceSupported is null || 
-                                           nonceSupported.Equals("true", StringComparison.OrdinalIgnoreCase);
-
-                if (shouldValidateNonce)
-                {
-                    var expectedNonceHash = ComputeNonceHash(expectedNonce);
-                    if (tokenNonce != expectedNonceHash)
-                    {
-                        return OAuthIdentityResult.Failure("invalid_nonce", "Security threat: Nonce mismatch.");
-                    }
-                }
+                return await ValidateTokenWithKeysAsync(idToken, expectedNonce, freshKeys, cancellationToken);
             }
-
-            // [BUG-02] Apple codifica email_verified como booleano JSON real en algunos flujos
-            // y como string "true"/"false" en otros. Manejamos ambos casos.
-            var emailVerifiedClaim = principal.FindFirst("email_verified")?.Value;
-            bool emailVerified = emailVerifiedClaim?.Equals("true", StringComparison.OrdinalIgnoreCase) == true;
-
-            // [MEJORA-03] Validar que sub no sea nulo — es el identificador único del usuario
-            var providerKey = principal.FindFirst("sub")?.Value;
-            if (string.IsNullOrEmpty(providerKey))
-                return OAuthIdentityResult.Failure("missing_sub", "Apple id_token does not contain a 'sub' claim.");
-
-            return new OAuthIdentityResult
+            catch (Exception innerEx)
             {
-                Succeeded = true,
-                ProviderKey = providerKey,
-                Email = principal.FindFirst("email")?.Value,
-                // Apple solo envía el nombre en el PRIMER inicio de sesión.
-                // En inicios de sesión subsecuentes, esta claim estará ausente.
-                DisplayName = principal.FindFirst("name")?.Value,
-                EmailVerified = emailVerified,
-                IdToken = idToken
-            };
+                return OAuthIdentityResult.Failure("validation_error",
+                    $"Falló incluso con llaves frescas: {innerEx.Message}");
+            }
         }
         catch (Exception ex)
         {
             return OAuthIdentityResult.Failure("validation_error", ex.Message);
         }
+    }
+
+    private async Task<OAuthIdentityResult> ValidateIdTokenCoreAsync(
+        string idToken, string? expectedNonce, CancellationToken cancellationToken)
+    {
+        var keys = await GetSigningKeysAsync(cancellationToken);
+        return await ValidateTokenWithKeysAsync(idToken, expectedNonce, keys, cancellationToken);
+    }
+
+    private async Task<OAuthIdentityResult> ValidateTokenWithKeysAsync(
+        string idToken, string? expectedNonce, IEnumerable<SecurityKey> keys, CancellationToken cancellationToken)
+    {
+        var validationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = Issuer,
+            ValidateAudience = true,
+            ValidAudience = _options.ClientId,
+            ValidateLifetime = true,
+            IssuerSigningKeys = keys,
+            ClockSkew = TimeSpan.FromMinutes(5)
+        };
+
+        var principal = _tokenHandler.ValidateToken(idToken, validationParameters, out var validatedToken);
+        var jwt = (JwtSecurityToken)validatedToken;
+
+        // [SEC-01] Validación de Nonce — CRÍTICO:
+        // Apple NO almacena el nonce en texto plano en el id_token.
+        // Almacena el hash SHA-256 del nonce original codificado en base64url (sin padding).
+        // La comparación directa con el nonce original SIEMPRE fallaría.
+        if (expectedNonce is not null)
+        {
+            var tokenNonce = jwt.Claims.FirstOrDefault(c => c.Type == "nonce")?.Value;
+            var nonceSupported = jwt.Claims.FirstOrDefault(c => c.Type == "nonce_supported")?.Value;
+
+            // Si Apple indica que nonce_supported es false, no validamos el nonce
+            // (Apple no lo procesó). Solo validamos si está presente o supported == true.
+            bool shouldValidateNonce = nonceSupported is null ||
+                                       nonceSupported.Equals("true", StringComparison.OrdinalIgnoreCase);
+
+            if (shouldValidateNonce)
+            {
+                var expectedNonceHash = ComputeNonceHash(expectedNonce);
+                if (tokenNonce != expectedNonceHash)
+                {
+                    return OAuthIdentityResult.Failure("invalid_nonce", "Security threat: Nonce mismatch.");
+                }
+            }
+        }
+
+        // [BUG-02] Apple codifica email_verified como booleano JSON real en algunos flujos
+        // y como string "true"/"false" en otros. Manejamos ambos casos.
+        var emailVerifiedClaim = principal.FindFirst("email_verified")?.Value;
+        bool emailVerified = emailVerifiedClaim?.Equals("true", StringComparison.OrdinalIgnoreCase) == true;
+
+        // [MEJORA-03] Validar que sub no sea nulo — es el identificador único del usuario
+        var providerKey = principal.FindFirst("sub")?.Value;
+        if (string.IsNullOrEmpty(providerKey))
+            return OAuthIdentityResult.Failure("missing_sub", "Apple id_token does not contain a 'sub' claim.");
+
+        return new OAuthIdentityResult
+        {
+            Succeeded = true,
+            ProviderKey = providerKey,
+            Email = principal.FindFirst("email")?.Value,
+            // Apple solo envía el nombre en el PRIMER inicio de sesión.
+            // En inicios de sesión subsecuentes, esta claim estará ausente.
+            DisplayName = principal.FindFirst("name")?.Value,
+            EmailVerified = emailVerified,
+            IdToken = idToken
+        };
     }
 
     public OAuthAuthorizationUrl BuildAuthorizationUrl(string redirectUri, string[] scopes, string state, string nonce)
@@ -273,19 +298,24 @@ public class AppleOAuthValidator : IOAuthProviderValidator
             .TrimEnd('=');
     }
 
-    private async Task<IEnumerable<SecurityKey>> GetSigningKeysAsync(CancellationToken ct)
+    private async Task<IEnumerable<SecurityKey>> GetSigningKeysAsync(CancellationToken ct, bool forceRefresh = false)
     {
+        if (!forceRefresh && _keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
+        {
+            return _keysCache.Value.Keys.GetSigningKeys();
+        }
+
         await _cacheLock.WaitAsync(ct);
         try
         {
-            if (_keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
+            if (!forceRefresh && _keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
             {
                 return _keysCache.Value.Keys.GetSigningKeys();
             }
 
             var response = await _httpClient.GetStringAsync(JwksUri, ct);
             var jwks = new JsonWebKeySet(response);
-            
+
             _keysCache = (jwks, DateTime.UtcNow.AddHours(24));
             return jwks.GetSigningKeys();
         }

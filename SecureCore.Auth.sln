@@ -45,6 +45,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SecureCore.Auth.OAuth.Apple
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SecureCore.Auth.OAuth.Apple.Tests", "tests\SecureCore.Auth.OAuth.Apple.Tests\SecureCore.Auth.OAuth.Apple.Tests.csproj", "{E82FC05E-84E0-4025-8B03-1E082D86F61C}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "SecureCore.Auth.OAuth.Tests", "tests\SecureCore.Auth.OAuth.Tests\SecureCore.Auth.OAuth.Tests.csproj", "{B2B3FA64-D91E-4E69-8C13-648C7ADDFDDE}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -271,6 +273,18 @@ Global
 		{E82FC05E-84E0-4025-8B03-1E082D86F61C}.Release|x64.Build.0 = Release|Any CPU
 		{E82FC05E-84E0-4025-8B03-1E082D86F61C}.Release|x86.ActiveCfg = Release|Any CPU
 		{E82FC05E-84E0-4025-8B03-1E082D86F61C}.Release|x86.Build.0 = Release|Any CPU
+		{B2B3FA64-D91E-4E69-8C13-648C7ADDFDDE}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B2B3FA64-D91E-4E69-8C13-648C7ADDFDDE}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B2B3FA64-D91E-4E69-8C13-648C7ADDFDDE}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{B2B3FA64-D91E-4E69-8C13-648C7ADDFDDE}.Debug|x64.Build.0 = Debug|Any CPU
+		{B2B3FA64-D91E-4E69-8C13-648C7ADDFDDE}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{B2B3FA64-D91E-4E69-8C13-648C7ADDFDDE}.Debug|x86.Build.0 = Debug|Any CPU
+		{B2B3FA64-D91E-4E69-8C13-648C7ADDFDDE}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B2B3FA64-D91E-4E69-8C13-648C7ADDFDDE}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B2B3FA64-D91E-4E69-8C13-648C7ADDFDDE}.Release|x64.ActiveCfg = Release|Any CPU
+		{B2B3FA64-D91E-4E69-8C13-648C7ADDFDDE}.Release|x64.Build.0 = Release|Any CPU
+		{B2B3FA64-D91E-4E69-8C13-648C7ADDFDDE}.Release|x86.ActiveCfg = Release|Any CPU
+		{B2B3FA64-D91E-4E69-8C13-648C7ADDFDDE}.Release|x86.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
@@ -294,5 +308,6 @@ Global
 		{3BA171F1-84F9-443D-B37D-CF10E3D37B25} = {D1000000-0000-0000-0000-000000000001}
 		{2279F9D1-2730-49F6-AF8A-C68B2C931795} = {D1000000-0000-0000-0000-000000000001}
 		{E82FC05E-84E0-4025-8B03-1E082D86F61C} = {D1000000-0000-0000-0000-000000000002}
+		{B2B3FA64-D91E-4E69-8C13-648C7ADDFDDE} = {D1000000-0000-0000-0000-000000000002}
 	EndGlobalSection
 EndGlobal

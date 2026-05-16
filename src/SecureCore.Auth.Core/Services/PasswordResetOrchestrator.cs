@@ -70,7 +70,11 @@ public sealed class PasswordResetOrchestrator(
         // 4. Calcular el Hash SHA256 que se almacenará
         var tokenHash = ComputeTokenHash(rawToken);
 
-        // 5. Persistir el hash del token
+        // 5. Persistir el hash del token primero
+        // DIDÁCTICA: Persistimos ANTES de enviar el email para mantener consistencia
+        // transaccional. Si el envío del email falla, el token ya está en BD y podemos
+        // reintentar el envío sin perder el estado. Si persistiéramos después,
+        // un fallo en StoreAsync() dejaría un token en el email sin respaldo en BD.
         var entry = new PasswordResetEntry
         {
             TokenHash = tokenHash,
@@ -87,7 +91,7 @@ public sealed class PasswordResetOrchestrator(
             UserId = user.Id
         }, cancellationToken);
 
-        // 7. Enviar la notificación al cliente real a través de una vía independiente
+        // 7. Enviar la notificación por email
         logger.LogInformation("Enviando token de reseteo a Email vinculado para el usuario {UserId}", user.Id);
         await resetTokenMailer.SendResetEmailAsync(email, rawToken, cancellationToken);
 

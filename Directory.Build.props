@@ -15,8 +15,8 @@
       Aseguramos que las rutas de salida sean relativas al directorio del proyecto. 
       Esto ayuda a mitigar problemas de CS0006 cuando se trabaja con symlinks.
     -->
-    <BaseOutputPath>bin\</BaseOutputPath>
-    <BaseIntermediateOutputPath>obj\</BaseIntermediateOutputPath>
+    <BaseOutputPath>$(MSBuildProjectDirectory)\bin\</BaseOutputPath>
+    <BaseIntermediateOutputPath>$(MSBuildProjectDirectory)\obj\</BaseIntermediateOutputPath>
   </PropertyGroup>
 
   <ItemGroup>

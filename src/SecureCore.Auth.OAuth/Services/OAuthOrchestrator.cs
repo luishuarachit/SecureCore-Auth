@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SecureCore.Auth.Abstractions.Interfaces;
 using SecureCore.Auth.Abstractions.Models;
@@ -23,8 +25,10 @@ public class OAuthOrchestrator(
     ITokenService tokenService,
     LockoutManager lockoutManager,
     IAuthEventDispatcher eventDispatcher,
+    IServiceProvider serviceProvider,
     IOptions<SecureAuthOptions> options,
-    IEnumerable<IOAuthProviderValidator> validators)
+    IEnumerable<IOAuthProviderValidator> validators,
+    ILogger<OAuthOrchestrator> logger)
 {
     private readonly SecureAuthOptions _options = options.Value;
 
@@ -62,7 +66,9 @@ public class OAuthOrchestrator(
         }
         else
         {
-            return OAuthSignInResult.Failure("Invalid OAuth validation request. Code or IdToken must be provided.");
+            return OAuthSignInResult.Failure(
+                "Invalid OAuth validation request. Code or IdToken must be provided.",
+                "oauth_invalid_request");
         }
 
         if (!identity.Succeeded || identity.ProviderKey is null)
@@ -71,10 +77,10 @@ public class OAuthOrchestrator(
             {
                 EventType = AuthEventType.LoginFailed,
                 UserId = "Unknown",
-                TimestampUtc = DateTimeOffset.UtcNow.UtcDateTime,
+                TimestampUtc = DateTime.UtcNow,
                 Metadata = new Dictionary<string, string> { { "Provider", provider }, { "Reason", identity.ErrorMessage ?? "Unknown" } }
             }, ct);
-            return OAuthSignInResult.Failure(identity.ErrorMessage ?? "OAuth validation failed");
+            return OAuthSignInResult.Failure(identity.ErrorMessage ?? "OAuth validation failed", "oauth_validation_failed");
         }
 
         var user = await userStore.FindByExternalProviderAsync(provider, identity.ProviderKey, ct);
@@ -82,10 +88,47 @@ public class OAuthOrchestrator(
 
         if (user is null)
         {
-            if (!signInOptions.AllowImplicitRegistration || signInOptions.UserFactoryType is null)
-                return OAuthSignInResult.UserNotFoundResult();
+            // DIDÁCTICA: El usuario no existe en nuestro sistema pero el proveedor externo
+            // nos devolvió una identidad válida. Si AllowImplicitRegistration está activo,
+            // podemos crear el usuario automáticamente delegando en IExternalUserFactory.
+            //
+            // IExternalUserFactory es el punto de extensión donde la aplicación consumidora
+            // decide cómo crear un usuario (qué tabla, qué datos extra guardar, etc.)
+            // a partir de la identidad validada por el proveedor OAuth.
+            //
+            // La aplicación debe registrar su factory en DI:
+            //   services.AddScoped<IExternalUserFactory, MiUserFactory>();
+            if (signInOptions.AllowImplicitRegistration)
+            {
+                // DIDÁCTICA: Resolvemos IExternalUserFactory desde el ServiceProvider en lugar
+                // de inyectarlo directamente, porque es un servicio OPCIONAL que la aplicación
+                // consumidora puede o no haber registrado. Al usar GetService (no GetRequiredService),
+                // obtenemos null si no está registrado, sin lanzar excepción de DI.
+                var userFactory = serviceProvider.GetService<IExternalUserFactory>();
+                if (userFactory is null)
+                {
+                    return OAuthSignInResult.Failure(
+                        "AllowImplicitRegistration está habilitado pero IExternalUserFactory " +
+                        "no está registrado. Registre una implementación vía: " +
+                        "services.AddScoped<IExternalUserFactory, TuFactory>().",
+                        "oauth_factory_not_registered");
+                }
 
-            return OAuthSignInResult.Failure("Implicit registration is enabled but IExternalUserFactory is not registered. Register a factory via AddExternalUserFactory<T>().");
+                user = await userFactory.CreateFromOAuthAsync(identity, provider, ct);
+                isNewUser = true;
+
+                logger.LogInformation(
+                    "Nuevo usuario creado automáticamente desde {Provider}: {Email}",
+                    provider, identity.Email);
+            }
+            else
+            {
+                // DIDÁCTICA: AllowImplicitRegistration=false (valor por defecto por seguridad).
+                // El usuario debe existir previamente en el sistema (registro tradicional).
+                // Esto evita que cualquiera que se autentique con Google/GitHub cree
+                // una cuenta automáticamente sin pasar por el flujo de registro.
+                return OAuthSignInResult.UserNotFoundResult();
+            }
         }
 
         if (lockoutManager.IsLockedOut(user))
@@ -94,7 +137,7 @@ public class OAuthOrchestrator(
             {
                 EventType = AuthEventType.AccountLockedOut,
                 UserId = user.Id,
-                TimestampUtc = DateTimeOffset.UtcNow.UtcDateTime,
+                TimestampUtc = DateTime.UtcNow,
                 Metadata = new Dictionary<string, string> { { "Provider", provider } }
             }, ct);
             return OAuthSignInResult.LockedOutResult();
@@ -133,7 +176,7 @@ public class OAuthOrchestrator(
         {
             EventType = AuthEventType.LoginSuccess,
             UserId = user.Id,
-            TimestampUtc = DateTimeOffset.UtcNow.UtcDateTime,
+            TimestampUtc = DateTime.UtcNow,
             Metadata = new Dictionary<string, string> { { "Provider", provider } }
         }, ct);
 
