@@ -5,6 +5,63 @@ Todas los cambios notables en este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 y este proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.0.0] - 2026-05-17
+
+### Añadido
+- **Sistema completo de Autenticación Multifactor (MFA)** (P3-14):
+  - `MfaOrchestrator`: orquestador principal para enrollment y verificación MFA
+  - `TotpService`: implementación nativa RFC 6238 de TOTP (sin librerías externas)
+  - `AesMfaEncryptionService`: cifrado AES-256-GCM para secretos TOTP almacenados
+  - `EmailMfaService`: códigos MFA temporales enviados por email
+  - `IMfaSessionStore`: gestión de tokens de sesión MFA con expiry
+  - `MfaOptions`: configuración flexible (habilitado/por defecto, métodos permitidos, códigos de recuperación)
+  - Modelos: `MfaEnrollmentStatus`, `MfaMethod`, `MfaEnrollmentResponse`, `MfaVerificationResult`
+  - Flujo completo: `StartEnrollmentAsync` → `CompleteEnrollmentAsync` → verificación en login
+
+- **Rate Limiter integrado** (P3-15):
+  - `IRateLimiter`: interfaz para limitación de tasa sliding window
+  - `InMemoryRateLimiter`: implementación thread-safe con ConcurrentDictionary
+  - `IOperationLock`: interfaz para locks de operaciones (previene race conditions)
+  - `InMemoryOperationLock`: implementación para bloqueos temporales de operaciones
+
+- **PasswordHasher asíncrono** (P3-16):
+  - Nuevo `IPasswordHasher` con métodos async: `HashPasswordAsync`, `VerifyPasswordAsync`
+  - `Argon2PasswordHasher` ahora soporta operaciones async para evitar bloqueo de threads HTTP
+  - Documentación sobre uso de `Task.Run` para operaciones CPU-bound
+
+- **Soporte para JWT con algoritmos asimétricos** (P3-17):
+  - Soporte para RS256, ES256, ES384, ES512 (firma asimétrica RSA/ECDSA)
+  - Nuevas propiedades en `JwtOptions`: `PrivateKey` (PEM), `PublicKey` (PEM)
+  - `SigningKey` ahora es opcional (solo requerido para HS256)
+  - `Algorithm` por defecto cambiado a RS256 (recomendado para producción)
+  - Cacheo de `SigningCredentials` para evitar recrear claves en cada request
+
+- **SampleApi con ejemplos MFA**:
+  - `InMemoryUserStore` con implementación completa de interfaces MFA
+  - Ejemplos de configuración de todos los servicios
+
+### Modificado
+- **Migración a .NET 10 LTS** (P3-18):
+  - Actualización de todos los proyectos a .NET 10
+  - Nuevo `Directory.Build.props` para estandarizar configuración de build
+  - Targets, propiedades y versiones centralizadas
+
+- **SecureAuthOptions expandido**:
+  - Nuevas opciones para MFA, rate limiting, password hasher, JWT
+  - Configuración de issuer/audience más flexible
+
+- **Mejoras en validadores OAuth OIDC**:
+  - Mejor manejo de JWKS con cacheo optimizado
+  - Refactor para reutilización de lógica de validación
+
+### Documentación
+- **Actualización completa de documentación técnica y de uso**:
+  - docs/en/technical-reference.md: referencia técnica completa actualizada
+  - docs/en/usage-guide.md: guía de uso en inglés
+  - docs/es/guia-de-uso.md: guía de uso en español
+  - docs/es/referencia-tecnica.md: referencia técnica en español
+  - Cobertura de todas las nuevas features: MFA, rate limiting, algoritmos asimétricos
+
 ## [2.4.0] - 2026-05-15
 
 ### Corregido
