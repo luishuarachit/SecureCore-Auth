@@ -35,11 +35,16 @@ public sealed class JwtTokenService(
 {
     private readonly JwtOptions _jwtOptions = jwtOptions.Value;
     private readonly SecureAuthOptions _authOptions = authOptions.Value;
+    private SigningCredentials? _cachedSigningCredentials;
 
     // DIDÁCTICA: Conjunto de claims que el sistema gestiona internamente y no deben
     // ser inyectados desde UserIdentity.Claims. Cualquier intento de sobrescribirlos
     // se ignora silenciosamente para evitar suplantación, escalación de privilegios
     // o bypass de mecanismos de seguridad como el SecurityStamp.
+    //
+    // NOTA: "amr" y "acr" NO están en esta lista para permitir que el implementador
+    // los agregue si desea indicar el método de autenticación (amr: pwd, oauth, webauthn)
+    // o el nivel de confianza (acr). Si los necesita, agréguelos en UserIdentity.Claims.
     private static readonly HashSet<string> SystemClaims =
     [
         JwtRegisteredClaimNames.Sub,
@@ -55,8 +60,6 @@ public sealed class JwtTokenService(
         "role",
         "roles",
         "auth_time",
-        "amr",
-        "acr",
         "azp",
         "nonce",
     ];
@@ -81,10 +84,10 @@ public sealed class JwtTokenService(
     {
         ArgumentNullException.ThrowIfNull(user);
 
-        // Creamos la clave de firma a partir de la configuración
-        var securityKey = new SymmetricSecurityKey(
-            Encoding.UTF8.GetBytes(_jwtOptions.SigningKey));
-        var credentials = new SigningCredentials(securityKey, _jwtOptions.Algorithm);
+        // DIDÁCTICA: Creamos las credenciales de firma según el algoritmo configurado.
+        // Para RS256/ES256 (asimétrico), usamos la clave privada RSA/ECDSA.
+        // Para HS256 (simétrico), usamos la clave secreta (SigningKey).
+        var credentials = CreateSigningCredentials();
 
         // DIDÁCTICA: Los claims son "afirmaciones" sobre el usuario que el servidor
         // incluye en el token. El cliente puede leerlos, pero no modificarlos
@@ -162,5 +165,85 @@ public sealed class JwtTokenService(
         // Si un atacante accede a la base de datos, solo verá los hashes.
         var bytes = SHA256.HashData(Encoding.UTF8.GetBytes(refreshToken));
         return Convert.ToHexString(bytes).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Crea las credenciales de firma según el algoritmo configurado.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: Esta método implementa la estrategia de firma según el algoritmo:
+    ///
+    /// - HS256 (simétrico): Usa SigningKey. La MISMA clave firma y valida.
+    ///   Riesgo: Si la clave se filtra, cualquiera puede伪造 tokens.
+    ///
+    /// - RS256/ES256 (asimétrico): Usa PrivateKey para firmar, PublicKey para validar.
+    ///   La clave privada permanece en el servidor; la pública se distribuye.
+    ///   Este es el método RECOMENDADO para producción.
+    /// </remarks>
+    private SigningCredentials CreateHmacSigningCredentials()
+    {
+        if (string.IsNullOrEmpty(_jwtOptions.SigningKey))
+        {
+            throw new InvalidOperationException(
+                "JWT Algorithm es HS256 pero no se ha configurado SigningKey. " +
+                "Configure Jwt:SigningKey enappsettings.json o use RS256/ES256.");
+        }
+
+        var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(_jwtOptions.SigningKey));
+        return new SigningCredentials(key, SecurityAlgorithms.HmacSha256);
+    }
+
+    private SigningCredentials CreateRsaSigningCredentials(string algorithm)
+    {
+        if (string.IsNullOrEmpty(_jwtOptions.PrivateKey))
+        {
+            throw new InvalidOperationException(
+                $"JWT Algorithm es RS256 pero no se ha configurado Jwt:PrivateKey. " +
+                "La clave privada RSA en formato PEM es requerida.");
+        }
+
+        // IMPORTANTE: No usar 'using' aquí porque la instancia de RSA debe
+        // permanecer viva mientras exista la SigningCredentials que la referencia.
+        // Se almacena la credencial en caché para no recrear/dispone la clave en cada llamada.
+        var rsa = RSA.Create();
+        rsa.ImportFromPem(_jwtOptions.PrivateKey);
+        var rsaKey = new RsaSecurityKey(rsa);
+        return new SigningCredentials(rsaKey, algorithm);
+    }
+
+    private SigningCredentials CreateEcdsaSigningCredentials(string algorithm)
+    {
+        if (string.IsNullOrEmpty(_jwtOptions.PrivateKey))
+        {
+            throw new InvalidOperationException(
+                $"JWT Algorithm es {_jwtOptions.Algorithm} pero no se ha configurado Jwt:PrivateKey. " +
+                "La clave privada ECDSA en formato PEM es requerida.");
+        }
+
+        var ecdsa = ECDsa.Create();
+        ecdsa.ImportFromPem(_jwtOptions.PrivateKey);
+        var ecdsaKey = new ECDsaSecurityKey(ecdsa);
+        return new SigningCredentials(ecdsaKey, algorithm);
+    }
+
+    private SigningCredentials CreateSigningCredentials()
+    {
+        if (_cachedSigningCredentials is not null)
+        {
+            return _cachedSigningCredentials;
+        }
+
+        _cachedSigningCredentials = _jwtOptions.Algorithm.ToUpperInvariant() switch
+        {
+            "HS256" => CreateHmacSigningCredentials(),
+            "RS256" => CreateRsaSigningCredentials(SecurityAlgorithms.RsaSha256),
+            "ES256" => CreateEcdsaSigningCredentials(SecurityAlgorithms.EcdsaSha256),
+            "ES384" => CreateEcdsaSigningCredentials(SecurityAlgorithms.EcdsaSha384),
+            "ES512" => CreateEcdsaSigningCredentials(SecurityAlgorithms.EcdsaSha512),
+            _ => throw new InvalidOperationException(
+                $"Algoritmo JWT no soportado: {_jwtOptions.Algorithm}. Use HS256, RS256, ES256, ES384 o ES512.")
+        };
+
+        return _cachedSigningCredentials;
     }
 }

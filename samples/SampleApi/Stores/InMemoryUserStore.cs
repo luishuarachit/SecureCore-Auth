@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using SecureCore.Auth.Abstractions;
 using SecureCore.Auth.Abstractions.Interfaces;
+using SecureCore.Auth.Abstractions.Models;
 
 namespace SampleApi.Stores;
 
@@ -137,6 +138,72 @@ public sealed class InMemoryUserStore : IUserStore
         if (_usersById.TryGetValue(userId, out var user))
         {
             var updated = user with { PasswordHash = newHash };
+            _usersById[userId] = updated;
+        }
+        return Task.CompletedTask;
+    }
+
+    /// <inheritdoc />
+    public Task UpdateMfaEnrollmentAsync(
+        string userId,
+        MfaEnrollmentStatus status,
+        string? preferredMethod = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (_usersById.TryGetValue(userId, out var user))
+        {
+            var updated = user with
+            {
+                MfaEnrollmentStatus = status,
+                PreferredMfaMethod = preferredMethod ?? user.PreferredMfaMethod,
+                MfaEnrolledAt = status == MfaEnrollmentStatus.Enrolled ? DateTimeOffset.UtcNow : user.MfaEnrolledAt
+            };
+            _usersById[userId] = updated;
+        }
+        return Task.CompletedTask;
+    }
+
+    /// <inheritdoc />
+    public Task SetTotpSecretAsync(string userId, string encryptedSecret, CancellationToken cancellationToken = default)
+    {
+        if (_usersById.TryGetValue(userId, out var user))
+        {
+            var updated = user with { TotpSecretEncrypted = encryptedSecret };
+            _usersById[userId] = updated;
+        }
+        return Task.CompletedTask;
+    }
+
+    /// <inheritdoc />
+    public Task SetRecoveryCodesAsync(string userId, List<string> codeHashes, CancellationToken cancellationToken = default)
+    {
+        if (_usersById.TryGetValue(userId, out var user))
+        {
+            var updated = user with { RecoveryCodeHashes = codeHashes };
+            _usersById[userId] = updated;
+        }
+        return Task.CompletedTask;
+    }
+
+    /// <inheritdoc />
+    public Task<int> IncrementMfaFailedAttemptsAsync(string userId, CancellationToken cancellationToken = default)
+    {
+        if (_usersById.TryGetValue(userId, out var user))
+        {
+            var newCount = user.MfaFailedAttemptsCount + 1;
+            var updated = user with { MfaFailedAttemptsCount = newCount };
+            _usersById[userId] = updated;
+            return Task.FromResult(newCount);
+        }
+        return Task.FromResult(0);
+    }
+
+    /// <inheritdoc />
+    public Task ResetMfaFailedAttemptsAsync(string userId, CancellationToken cancellationToken = default)
+    {
+        if (_usersById.TryGetValue(userId, out var user))
+        {
+            var updated = user with { MfaFailedAttemptsCount = 0 };
             _usersById[userId] = updated;
         }
         return Task.CompletedTask;

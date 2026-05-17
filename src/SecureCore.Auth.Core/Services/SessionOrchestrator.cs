@@ -33,9 +33,12 @@ public sealed class SessionOrchestrator(
     SecurityStampValidator stampValidator,
     IAuthEventDispatcher eventDispatcher,
     IOptions<SecureAuthOptions> options,
+    IOperationLock operationLock,
     ILogger<SessionOrchestrator> logger)
 {
     private readonly SecureAuthOptions _options = options.Value;
+    private readonly TimeSpan _lockTimeout = TimeSpan.FromSeconds(
+        options.Value.OperationLock?.TimeoutSeconds ?? 5);
 
     /// <summary>
     /// Rota un Refresh Token: invalida el actual y emite uno nuevo.
@@ -87,57 +90,85 @@ public sealed class SessionOrchestrator(
         // Paso 3: Verificar si el token ya fue reemplazado (posible race condition o reuso)
         if (existingEntry.ReplacedByTokenHash is not null)
         {
-            var timeSinceReplaced = DateTime.UtcNow - existingEntry.ReplacedAtUtc;
-
-            // Grace Period: si fue reemplazado hace menos de N segundos, es una race condition
-            if (timeSinceReplaced.HasValue &&
-                timeSinceReplaced.Value.TotalSeconds <= _options.GracePeriodSeconds)
+            // DIDÁCTICA: Grace Period para race conditions en Refresh Token Rotation.
+            // Si el token fue reemplazado recientemente (dentro del periodo de gracia),
+            // permitimos el uso para evitar falsos positivos en escenarios de red inestable.
+            if (existingEntry.ReplacedAtUtc.HasValue)
             {
-                logger.LogDebug(
-                    "Token dentro del periodo de gracia ({Seconds}s). Retornando respuesta existente.",
-                    timeSinceReplaced.Value.TotalSeconds);
+                var timeSinceReplaced = DateTime.UtcNow - existingEntry.ReplacedAtUtc.Value;
 
-                // Retornamos el token de reemplazo existente (idempotente)
-                var replacementEntry = await sessionStore.FindByTokenHashAsync(
-                    existingEntry.ReplacedByTokenHash, cancellationToken);
-
-                if (replacementEntry is not null)
+                // Grace Period: si fue reemplazado hace menos de N segundos, es una race condition
+                if (timeSinceReplaced.TotalSeconds <= _options.GracePeriodSeconds)
                 {
-                    var user = await userStore.FindByIdAsync(existingEntry.UserId, cancellationToken);
-                    if (user is not null)
+                    logger.LogDebug(
+                        "Token dentro del periodo de gracia ({Seconds}s). Retornando respuesta existente.",
+                        timeSinceReplaced.TotalSeconds);
+
+                    // Retornamos el token de reemplazo existente (idempotente)
+                    var replacementEntry = await sessionStore.FindByTokenHashAsync(
+                        existingEntry.ReplacedByTokenHash, cancellationToken);
+
+                    if (replacementEntry is not null)
                     {
-                        // Generamos un nuevo Access Token pero mantenemos la misma sesión
-                        var accessToken = tokenService.GenerateAccessToken(user);
-                        return new TokenResponse(
-                            accessToken,
-                            currentRefreshToken, // Mantenemos el mismo refresh token
-                            DateTimeOffset.UtcNow.Add(_options.AccessTokenLifetime));
+                        var user = await userStore.FindByIdAsync(existingEntry.UserId, cancellationToken);
+                        if (user is not null)
+                        {
+                            // Generamos un nuevo Access Token pero mantenemos la misma sesión
+                            var accessToken = tokenService.GenerateAccessToken(user);
+                            return new TokenResponse(
+                                accessToken,
+                                currentRefreshToken, // Mantenemos el mismo refresh token
+                                DateTimeOffset.UtcNow.Add(_options.AccessTokenLifetime));
+                        }
                     }
+
+                    return null;
                 }
+
+                // ⚠️ Fuera del periodo de gracia: REUSO DETECTADO
+                logger.LogCritical(
+                    "¡REUSO DE TOKEN FUERA DEL PERIODO DE GRACIA! FamilyId: {FamilyId}, UserId: {UserId}",
+                    existingEntry.FamilyId, existingEntry.UserId);
+
+                await sessionStore.RevokeByFamilyAsync(existingEntry.FamilyId, cancellationToken);
+
+                await eventDispatcher.DispatchAsync(new AuthEvent
+                {
+                    EventType = AuthEventType.SuspiciousActivityDetected,
+                    UserId = existingEntry.UserId,
+                    Metadata = new Dictionary<string, string>
+                    {
+                        ["reason"] = "token_reuse_outside_grace_period",
+                        ["familyId"] = existingEntry.FamilyId,
+                        ["secondsSinceReplaced"] = timeSinceReplaced.TotalSeconds.ToString("F0")
+                    }
+                }, cancellationToken);
 
                 return null;
             }
-
-            // ⚠️ Fuera del periodo de gracia: REUSO DETECTADO
-            logger.LogCritical(
-                "¡REUSO DE TOKEN FUERA DEL PERIODO DE GRACIA! FamilyId: {FamilyId}, UserId: {UserId}",
-                existingEntry.FamilyId, existingEntry.UserId);
-
-            await sessionStore.RevokeByFamilyAsync(existingEntry.FamilyId, cancellationToken);
-
-            await eventDispatcher.DispatchAsync(new AuthEvent
+            else
             {
-                EventType = AuthEventType.SuspiciousActivityDetected,
-                UserId = existingEntry.UserId,
-                Metadata = new Dictionary<string, string>
-                {
-                    ["reason"] = "token_reuse_outside_grace_period",
-                    ["familyId"] = existingEntry.FamilyId,
-                    ["secondsSinceReplaced"] = timeSinceReplaced?.TotalSeconds.ToString("F0") ?? "unknown"
-                }
-            }, cancellationToken);
+                // ReplacedByTokenHash no es null pero ReplacedAtUtc es null
+                // Esto es un caso edge - tratar como reuse
+                logger.LogCritical(
+                    "¡REUSO DE TOKEN - FECHA DESCONOCIDA! FamilyId: {FamilyId}, UserId: {UserId}",
+                    existingEntry.FamilyId, existingEntry.UserId);
 
-            return null;
+                await sessionStore.RevokeByFamilyAsync(existingEntry.FamilyId, cancellationToken);
+
+                await eventDispatcher.DispatchAsync(new AuthEvent
+                {
+                    EventType = AuthEventType.SuspiciousActivityDetected,
+                    UserId = existingEntry.UserId,
+                    Metadata = new Dictionary<string, string>
+                    {
+                        ["reason"] = "token_reuse_unknown_date",
+                        ["familyId"] = existingEntry.FamilyId
+                    }
+                }, cancellationToken);
+
+                return null;
+            }
         }
 
         // Paso 4: Verificar expiración
@@ -148,6 +179,16 @@ public sealed class SessionOrchestrator(
         }
 
         // Paso 5: Token válido → Rotación exitosa
+        // DIDÁCTICA: Usamos un lock para prevenir race conditions en la rotación de tokens.
+        // El lock se acquire sobre el FamilyId para que solo una solicitud a la vez
+        // pueda rotar tokens de una sesión específica.
+        // Nota: Si la arquitectura es multi-instancia, el implementador debe registrar
+        // una implementación de IOperationLock que use un store distribuido (Redis, etc.)
+        using var @lock = await operationLock.AcquireAsync(
+            $"rtr:{existingEntry.FamilyId}",
+            _lockTimeout,
+            cancellationToken);
+
         var newUser = await userStore.FindByIdAsync(existingEntry.UserId, cancellationToken);
         if (newUser is null)
         {

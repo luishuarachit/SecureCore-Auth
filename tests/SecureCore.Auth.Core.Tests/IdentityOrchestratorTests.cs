@@ -21,6 +21,8 @@ public class IdentityOrchestratorTests
     private readonly ISessionStore _sessionStore;
     private readonly IAuthEventDispatcher _eventDispatcher;
     private readonly LockoutManager _lockoutManager;
+    private readonly IMfaSessionStore _mfaSessionStore;
+    private readonly IMfaService _mfaService;
 
     public IdentityOrchestratorTests()
     {
@@ -29,12 +31,23 @@ public class IdentityOrchestratorTests
         _tokenService = Substitute.For<ITokenService>();
         _sessionStore = Substitute.For<ISessionStore>();
         _eventDispatcher = Substitute.For<IAuthEventDispatcher>();
+        _mfaSessionStore = Substitute.For<IMfaSessionStore>();
+        _mfaService = Substitute.For<IMfaService>();
 
         var authOptions = Options.Create(new SecureAuthOptions
         {
             MaxFailedAttempts = 5,
             RefreshTokenLifetime = TimeSpan.FromDays(7)
         });
+
+        var mfaOptions = Options.Create(new MfaOptions
+        {
+            Enabled = true,
+            AllowedMethods = new List<string> { "totp", "email" }
+        });
+
+        _mfaSessionStore.CreateMfaSessionTokenAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+            .Returns(Task.FromResult("mfa-session-token"));
 
         _lockoutManager = new LockoutManager(
             _userStore, authOptions, NullLogger<LockoutManager>.Instance);
@@ -47,6 +60,9 @@ public class IdentityOrchestratorTests
             _lockoutManager,
             _eventDispatcher,
             authOptions,
+            mfaOptions,
+            _mfaSessionStore,
+            _mfaService,
             NullLogger<IdentityOrchestrator>.Instance);
     }
 
@@ -76,7 +92,7 @@ public class IdentityOrchestratorTests
         var password = "some_password";
 
         // Act
-        var (result, tokens) = await _orchestrator.SignInWithPasswordAsync("noone@example.com", password);
+        var (result, tokens, _) = await _orchestrator.SignInWithPasswordAsync("noone@example.com", password);
 
         // Assert — debe llamar a la verificación ficticia para evitar timing attacks
         Assert.False(result.Succeeded);
@@ -93,7 +109,7 @@ public class IdentityOrchestratorTests
             .Returns(ValueTask.FromResult<UserIdentity?>(user));
 
         // Act
-        var (result, tokens) = await _orchestrator.SignInWithPasswordAsync("test@example.com", "pass");
+        var (result, tokens, _) = await _orchestrator.SignInWithPasswordAsync("test@example.com", "pass");
 
         // Assert
         Assert.True(result.IsLockedOut);
@@ -116,7 +132,7 @@ public class IdentityOrchestratorTests
             .Returns(Task.FromResult(1));
 
         // Act
-        var (result, tokens) = await _orchestrator.SignInWithPasswordAsync("test@example.com", "wrong");
+        var (result, tokens, _) = await _orchestrator.SignInWithPasswordAsync("test@example.com", "wrong");
 
         // Assert
         Assert.False(result.Succeeded);
@@ -131,14 +147,14 @@ public class IdentityOrchestratorTests
     public async Task SignInWithPasswordAsync_TwoFactorEnabled_ReturnsTwoFactorRequired()
     {
         // Arrange
-        var user = CreateTestUser(twoFactor: true);
+        var user = CreateTestUser(twoFactor: true) with { MfaEnrollmentStatus = MfaEnrollmentStatus.Enrolled };
         _userStore.FindByEmailAsync(Arg.Any<string>())
             .Returns(ValueTask.FromResult<UserIdentity?>(user));
         _passwordHasher.VerifyPassword(Arg.Any<string>(), Arg.Any<string>())
             .Returns(PasswordVerificationResult.Success);
 
         // Act
-        var (result, tokens) = await _orchestrator.SignInWithPasswordAsync("test@example.com", "correct");
+        var (result, tokens, _) = await _orchestrator.SignInWithPasswordAsync("test@example.com", "correct");
 
         // Assert
         Assert.True(result.RequiresTwoFactor);
@@ -160,7 +176,7 @@ public class IdentityOrchestratorTests
             .Returns("hashed-refresh");
 
         // Act
-        var (result, tokens) = await _orchestrator.SignInWithPasswordAsync("test@example.com", "correct");
+        var (result, tokens, _) = await _orchestrator.SignInWithPasswordAsync("test@example.com", "correct");
 
         // Assert
         Assert.True(result.Succeeded);

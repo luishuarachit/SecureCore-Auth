@@ -19,6 +19,14 @@
     <BaseIntermediateOutputPath>$(MSBuildProjectDirectory)\obj\</BaseIntermediateOutputPath>
   </PropertyGroup>
 
+  <PropertyGroup>
+    <Version>2.4.0</Version>
+    <Authors>SecureCore Auth Contributors</Authors>
+    <Company>SecureCore</Company>
+    <Product>SecureCore Auth Framework</Product>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
   <ItemGroup>
     <!-- Opt-out de telemetría de compilación si es necesario o añadir analizadores globales -->
   </ItemGroup>

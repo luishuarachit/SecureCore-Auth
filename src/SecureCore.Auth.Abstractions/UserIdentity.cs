@@ -60,4 +60,40 @@ public record UserIdentity
     /// Claims adicionales para incluir en el JWT.
     /// </summary>
     public Dictionary<string, string>? Claims { get; init; }
+
+    /// <summary>
+    /// Método MFA preferido del usuario ("totp" | "email").
+    /// </summary>
+    public string? PreferredMfaMethod { get; init; }
+
+    /// <summary>
+    /// Secreto TOTP cifrado (AES-256-GCM).
+    /// </summary>
+    public string? TotpSecretEncrypted { get; init; }
+
+    /// <summary>
+    /// Estado del enrollment MFA.
+    /// </summary>
+    public Models.MfaEnrollmentStatus MfaEnrollmentStatus { get; init; }
+
+    /// <summary>
+    /// Códigos de recuperación (hash SHA-256, un solo uso).
+    /// </summary>
+    public List<string>? RecoveryCodeHashes { get; init; }
+
+    /// <summary>
+    /// Fecha UTC del último uso exitoso de MFA.
+    /// </summary>
+    public DateTimeOffset? LastMfaVerifiedAt { get; init; }
+
+    /// <summary>
+    /// Contador de intentos fallidos de verificación MFA.
+    /// Se resetea tras éxito o tras ventana de tiempo.
+    /// </summary>
+    public int MfaFailedAttemptsCount { get; init; }
+
+    /// <summary>
+    /// Fecha UTC en que el usuario completó el enrollment MFA.
+    /// </summary>
+    public DateTimeOffset? MfaEnrolledAt { get; init; }
 }

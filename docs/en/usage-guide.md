@@ -724,7 +724,88 @@ app.MapSecureOAuthEndpoints();
 
 ---
 
-### Use Case 8: Password Reset (Forgot your password?)
+### Use Case 8: Multi-Factor Authentication (MFA)
+
+**Scenario**: Adding an additional layer of security beyond the password.
+
+**Supported Methods**:
+- **TOTP**: Google Authenticator, Authy, Microsoft Authenticator (6-digit codes)
+- **Email**: Verification code sent to user's email
+
+**Security Flow**:
+1. User initiates login with email + password
+2. If MFA is enabled, server returns `requiresTwoFactor: true` + `mfaSessionToken`
+3. User enters the TOTP/email code
+4. Server verifies the code and returns access tokens
+
+**Configuration**:
+```csharp
+builder.Services.AddSecureAuth(options =>
+{
+    // Enable MFA globally
+    options.Auth.Mfa.Enabled = true;
+
+    // MFA required for all users (optional)
+    options.Auth.Mfa.RequiredByDefault = false;
+
+    // Allowed methods
+    options.Auth.Mfa.AllowedMethods = ["totp", "email"];
+
+    // Encryption key for TOTP secrets (required)
+    // Generate with: Convert.ToHexString(RandomNumberGenerator.GetBytes(32))
+    options.Auth.Mfa.EncryptionKey = "abc123...";
+})
+.AddPasswordAuthentication()
+.AddMfa();  // <-- Important: register MFA services
+```
+
+**Login Flow with MFA**:
+```http
+// Step 1: Login with password
+POST /auth/login
+{ "email": "user@example.com", "password": "..." }
+
+// Response (if MFA required):
+{
+  "requiresTwoFactor": true,
+  "mfaSessionToken": "eyJ..."
+}
+
+// Step 2: Verify MFA code
+POST /auth/mfa/verify
+{
+  "mfaSessionToken": "eyJ...",
+  "code": "123456"  // TOTP or email code
+}
+
+// Successful response:
+{
+  "accessToken": "eyJ...",
+  "refreshToken": "eyJ...",
+  "expiresAt": "2026-01-01T12:00:00Z"
+}
+```
+
+**Enrollment (Activating MFA)**:
+```http
+// Start TOTP enrollment
+POST /auth/mfa/setup
+{ "method": "totp" }
+// Response:
+// { "totpAuthUri": "otpauth://totp/...", "mfaSessionToken": "eyJ..." }
+
+// User scans QR and gets a code
+// Then verify the code to complete enrollment
+POST /auth/mfa/verify-code
+{ "mfaSessionToken": "eyJ...", "code": "123456" }
+```
+
+**⚠️ Additional Security Requirements**:
+The implementer MUST integrate a CAPTCHA solution (Cloudflare Turnstile, hCAPTCHA, reCAPTCHA) to protect MFA enrollment and password reset endpoints against automation. The library does not include CAPTCHA by default.
+
+---
+
+### Use Case 9: Password Reset (Forgot your password?)
 
 **Scenario**: A user has forgotten their password and wants to recover it safely.
 
@@ -876,6 +957,10 @@ SecureCore Auth emits events every time something important happens. You can cap
 | `Logout` | Individual logout | Auditing |
 | `PasswordResetRequested` | Reset request initiated | Optional secondary email notification |
 | `PasswordResetCompleted` | Password changed successfully | Security notification |
+| `MfaEnrolled` | MFA successfully enrolled | Confirmation to user |
+| `MfaVerificationSuccess` | MFA verification passed | Audit logging |
+| `MfaVerificationFailed` | MFA verification failed | Intrusion detection |
+| `MfaDisabled` | MFA disabled by user | Security notification |
 
 #### Implementing a custom handler
 
@@ -937,17 +1022,23 @@ builder.Services.AddTransient<IAuthEventHandler, MyEventHandler>();
 ```csharp
 builder.Services.AddSecureAuth(options =>
 {
-    // ═══ JWT ═══
+    // ═══ JWT (RS256 - Recommended for production) ═══
     options.Jwt.Issuer = "myapp.com";        // Token issuer
     options.Jwt.Audience = "myapp-api";       // Token audience
-    options.Jwt.SigningKey = "...";            // Signing key (REQUIRED: min 32 chars)
-    options.Jwt.Algorithm = "HS256";           // Signing algorithm (default)
+    options.Jwt.Algorithm = "RS256";         // Signing algorithm (RECOMMENDED: RS256 or ES256)
+
+    // For RS256/ES256, use asymmetric keys:
+    // options.Jwt.PrivateKey = "-----BEGIN RSA PRIVATE KEY-----\n...";
+    // options.Jwt.PublicKey = "-----BEGIN PUBLIC KEY-----\n...";
+
+    // For HS256 (legacy, not recommended):
+    // options.Jwt.SigningKey = "...";            // Symmetric key (min 32 chars)
 
     // ═══ Session tokens ═══
     options.Auth.AccessTokenLifetime = TimeSpan.FromMinutes(15);  // JWT lifetime
     options.Auth.RefreshTokenLifetime = TimeSpan.FromDays(7);     // Refresh lifetime
     options.Auth.GracePeriodSeconds = 30;      // Tolerance for duplicate submissions
-    options.Auth.ClockSkew = TimeSpan.FromMinutes(5); // Clock tolerance
+    options.Auth.ClockSkew = TimeSpan.FromSeconds(30); // Clock tolerance (default: 30s)
 
     // ═══ Brute-force protection ═══
     options.Auth.MaxFailedAttempts = 5;
@@ -959,13 +1050,43 @@ builder.Services.AddSecureAuth(options =>
         TimeSpan.FromHours(1)      // 4th+ lockout
     };
 
+    // ═══ IP-based rate limiting (login) ═══
+    options.Auth.LoginRateLimitMaxAttempts = 10;    // Max attempts per IP
+    options.Auth.LoginRateLimitWindow = TimeSpan.FromMinutes(1); // Time window
+
     // ═══ SecurityStamp cache ═══
-    options.Auth.SecurityStampCacheDuration = TimeSpan.FromMinutes(5);
+    options.Auth.SecurityStampCacheDuration = TimeSpan.FromMinutes(1); // (default: 1 min)
 
     // ═══ Argon2 Password Hashing ═══
     options.Argon2.MemorySize = 65536;  // 64 MB of RAM per hash
     options.Argon2.Iterations = 3;       // 3 passes
     options.Argon2.Parallelism = 4;      // 4 parallel threads
+
+    // ═══ MFA (Multi-Factor Authentication) ═══
+    // Enable MFA (optional, default: false)
+    options.Auth.Mfa.Enabled = true;
+
+    // MFA required for all users?
+    options.Auth.Mfa.RequiredByDefault = false;
+
+    // Allowed methods: ["totp", "email"]
+    options.Auth.Mfa.AllowedMethods = ["totp", "email"];
+
+    // Allow voluntary enrollment?
+    options.Auth.Mfa.AllowUserEnrollment = true;
+
+    // Allow users to disable their MFA?
+    options.Auth.Mfa.AllowUserDisable = true;
+
+    // Recovery codes (NOT RECOMMENDED)
+    options.Auth.Mfa.EnableRecoveryCodes = false;
+
+    // Issuer for TOTP QR code
+    options.Auth.Mfa.TotpIssuer = "MyApp";
+
+    // Encryption key for TOTP secrets (64 hex characters)
+    // GENERATE: Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant()
+    options.Auth.Mfa.EncryptionKey = "a1b2c3d4e5f6...";
 
     // ═══ Password Reset ═══
     // options.AddPasswordReset(reset => { ... }); // Use the builder
@@ -996,3 +1117,176 @@ Open `http://localhost:5000/swagger` to explore the endpoints interactively.
 **The pre-loaded test user is**:
 - Email: `demo@securecore.dev`
 - Password: `P@ssw0rd123!`
+
+---
+
+## Production Security Configuration
+
+### HTTPS and HSTS
+
+In production, you must enforce HTTPS:
+
+```csharp
+var app = builder.Build();
+
+// Redirect HTTP → HTTPS in production
+if (app.Environment.IsProduction())
+{
+    app.UseHttpsRedirection();
+    app.UseHsts();  // Strict-Transport-Security for 1 year
+}
+
+// Authentication pipeline
+app.UseAuthentication();
+app.UseSecureAuthValidation();
+app.UseAuthorization();
+
+app.Run();
+```
+
+### Cookie Protection
+
+If you use cookies for client-side sessions:
+
+```csharp
+builder.Services.Configure<CookiePolicyOptions>(options =>
+{
+    options.Secure = CookieSecurePolicy.Always;    // HTTPS only
+    options.HttpOnly = HttpOnlyPolicy.Always;       // Not accessible from JS
+    options.MinimumSameSitePolicy = SameSiteMode.Strict;  // CSRF protection
+});
+
+app.UseCookiePolicy();
+```
+
+### Security Headers
+
+Add protection against XSS, clickjacking, and other threats:
+
+```csharp
+app.Use(async (context, next) =>
+{
+    context.Response.Headers.Add("X-Content-Type-Options", "nosniff");
+    context.Response.Headers.Add("X-Frame-Options", "DENY");
+    context.Response.Headers.Add("X-XSS-Protection", "1; mode=block");
+    context.Response.Headers.Add("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+    context.Response.Headers.Add("Content-Security-Policy", "default-src 'self'");
+    await next(context);
+});
+```
+
+### Distributed Rate Limiting (IRateLimiter)
+
+The library includes `IRateLimiter` to prevent brute force attacks. By default it uses `InMemoryRateLimiter` which works for **single-instance**. For multi-server architectures, implement your own version with Redis:
+
+```csharp
+// Your custom implementation
+public sealed class RedisRateLimiter : IRateLimiter
+{
+    private readonly IConnectionMultiplexer _redis;
+    private readonly int _maxAttempts;
+    private readonly TimeSpan _window;
+
+    public RedisRateLimiter(IConnectionMultiplexer redis, int maxAttempts, TimeSpan window)
+    {
+        _redis = redis;
+        _maxAttempts = maxAttempts;
+        _window = window;
+    }
+
+    public bool IsAllowed(string key)
+    {
+        var db = _redis.GetDatabase();
+        var count = db.StringIncrementAsync($"ratelimit:{key}").Result;
+        if (count == 1)
+            db.KeyExpireAsync($"ratelimit:{key}", _window);
+        return count <= _maxAttempts;
+    }
+
+    public void Reset(string key) => _redis.GetDatabase().KeyDeleteAsync($"ratelimit:{key}");
+
+    public int GetRemainingAttempts(string key)
+    {
+        var current = _redis.GetDatabase().StringGetAsync($"ratelimit:{key}").Result;
+        return current.IsNullOrEmpty ? _maxAttempts : Math.Max(0, _maxAttempts - (int)current);
+    }
+}
+
+// Registration in Program.cs
+builder.Services.AddSingleton<IRateLimiter>(sp =>
+{
+    var redis = sp.GetRequiredService<IConnectionMultiplexer>();
+    return new RedisRateLimiter(redis, 10, TimeSpan.FromMinutes(1));
+});
+```
+
+### Critical Operation Locks (IOperationLock)
+
+To prevent race conditions in refresh token rotation, the library uses `IOperationLock`. It works automatically in single-instance; for multi-instance, implement your own version:
+
+```csharp
+// Your Redis implementation
+public sealed class RedisOperationLock : IOperationLock
+{
+    private readonly IConnectionMultiplexer _redis;
+    private readonly TimeSpan _defaultTimeout;
+
+    public RedisOperationLock(IConnectionMultiplexer redis, TimeSpan? defaultTimeout = null)
+    {
+        _redis = redis;
+        _defaultTimeout = defaultTimeout ?? TimeSpan.FromSeconds(5);
+    }
+
+    public async Task<IDisposable> AcquireAsync(string key, TimeSpan timeout, CancellationToken ct)
+    {
+        var db = _redis.GetDatabase();
+        var acquired = await db.StringSetAsync($"lock:{key}", "1", timeout, When.NotExists);
+        if (!acquired) throw new TimeoutException($"Could not acquire lock: {key}");
+        return new RedisLockReleaser(db, $"lock:{key}");
+    }
+
+    private sealed class RedisLockReleaser : IDisposable
+    {
+        private readonly IDatabase _db;
+        private readonly string _key;
+        public RedisLockReleaser(IDatabase db, string key) { _db = db; _key = key; }
+        public void Dispose() => _db.KeyDelete(_key);
+    }
+}
+
+// Registration
+builder.Services.AddSingleton<IOperationLock>(sp =>
+{
+    var redis = sp.GetRequiredService<IConnectionMultiplexer>();
+    return new RedisOperationLock(redis);
+});
+```
+
+### Rate Limiter and Lock Configuration
+
+```json
+{
+  "SecureAuth": {
+    "RateLimiter": {
+      "MaxAttempts": 10,
+      "Window": "00:01:00"
+    },
+    "OperationLock": {
+      "TimeoutSeconds": 5
+    }
+  }
+}
+```
+
+### Production Security Checklist
+
+- [ ] HTTPS enabled (valid certificate, not self-signed)
+- [ ] HSTS configured with `max-age` minimum 31536000 (1 year)
+- [ ] Restrictive CSP (no `unsafe-inline`)
+- [ ] Cookies with `Secure`, `HttpOnly`, `SameSite=Strict`
+- [ ] Distributed rate limiting (Redis) in production with multiple servers
+- [ ] JWT using RS256/ES256 (not HS256)
+- [ ] Secrets in environment variables or Key Vault (NOT in code)
+- [ ] Security event logging (login, logout, suspicious attempts)
+- [ ] Performance and security monitoring
+- [ ] Penetration testing before production

@@ -36,9 +36,11 @@ public class MicrosoftOAuthValidator : IOAuthProviderValidator
     private readonly HttpClient _httpClient;
     private readonly JwtSecurityTokenHandler _tokenHandler = new();
     
-    // Caché simple para evitar latencia en cada login
-    private static (JsonWebKeySet Keys, DateTime Expiry)? _keysCache;
-    private static readonly SemaphoreSlim _cacheLock = new(1, 1);
+    // Caché JWKS con Lazy<Task> para evitar cuello de botella en alta concurrencia
+    private static Lazy<Task<JsonWebKeySet>>? _jwksRefreshTask;
+    private static DateTime _jwksLastRefreshed;
+    private static readonly TimeSpan JwksCacheDuration = TimeSpan.FromHours(24);
+    private static readonly object _cacheLock = new();
 
     public MicrosoftOAuthValidator(MicrosoftOAuthOptions options, HttpClient httpClient)
     {
@@ -149,31 +151,40 @@ public class MicrosoftOAuthValidator : IOAuthProviderValidator
 
     private async Task<IEnumerable<SecurityKey>> GetSigningKeysAsync(CancellationToken ct, bool forceRefresh = false)
     {
-        if (!forceRefresh && _keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
+        var now = DateTime.UtcNow;
+
+        // Primera verificación SIN lock: caso común (caché válida)
+        if (!forceRefresh && _jwksRefreshTask is { IsValueCreated: true } && now - _jwksLastRefreshed < JwksCacheDuration)
         {
-            return _keysCache.Value.Keys.GetSigningKeys();
+            var jwks = await _jwksRefreshTask.Value;
+            return jwks.GetSigningKeys();
         }
 
-        await _cacheLock.WaitAsync(ct);
-        try
+        lock (_cacheLock)
         {
-            if (!forceRefresh && _keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
+            // Segunda verificación CON lock
+            if (!forceRefresh && _jwksRefreshTask is { IsValueCreated: true } && now - _jwksLastRefreshed < JwksCacheDuration)
             {
-                return _keysCache.Value.Keys.GetSigningKeys();
+                return _jwksRefreshTask.Value.Result.GetSigningKeys();
             }
 
-            var jwks = await _httpClient.GetFromJsonAsync<JsonWebKeySet>(GetJwksUri(), ct);
-            if (jwks != null)
-            {
-                _keysCache = (jwks, DateTime.UtcNow.AddHours(24));
-                return jwks.GetSigningKeys();
-            }
-            throw new Exception("Failed to fetch Microsoft JWKS");
+            // Necesitamos refresh: crear nueva Lazy<Task>
+            _jwksLastRefreshed = now;
+            _jwksRefreshTask = new Lazy<Task<JsonWebKeySet>>(() => FetchJwksAsync(ct));
         }
-        finally
+
+        var jwksResult = await _jwksRefreshTask.Value;
+        return jwksResult.GetSigningKeys();
+    }
+
+    private async Task<JsonWebKeySet> FetchJwksAsync(CancellationToken ct)
+    {
+        var jwks = await _httpClient.GetFromJsonAsync<JsonWebKeySet>(GetJwksUri(), ct);
+        if (jwks != null)
         {
-            _cacheLock.Release();
+            return jwks;
         }
+        throw new Exception("Failed to fetch Microsoft JWKS");
     }
 
     public OAuthAuthorizationUrl BuildAuthorizationUrl(string redirectUri, string[] scopes, string state, string nonce)

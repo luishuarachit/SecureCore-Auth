@@ -33,9 +33,13 @@ public sealed class IdentityOrchestrator(
     LockoutManager lockoutManager,
     IAuthEventDispatcher eventDispatcher,
     IOptions<SecureAuthOptions> options,
+    IOptions<MfaOptions> mfaOptions,
+    IMfaSessionStore mfaSessionStore,
+    IMfaService mfaService,
     ILogger<IdentityOrchestrator> logger)
 {
     private readonly SecureAuthOptions _options = options.Value;
+    private readonly MfaOptions _mfaOptions = mfaOptions.Value;
 
     /// <summary>
     /// Intenta autenticar un usuario con email y contraseña.
@@ -43,8 +47,8 @@ public sealed class IdentityOrchestrator(
     /// <param name="email">Email del usuario.</param>
     /// <param name="password">Contraseña en texto plano.</param>
     /// <param name="cancellationToken">Token de cancelación.</param>
-    /// <returns>Tupla con el resultado del login y los tokens (si fue exitoso).</returns>
-    public async Task<(SignInResult Result, TokenResponse? Tokens)> SignInWithPasswordAsync(
+    /// <returns>Tupla con el resultado del login, los tokens (si fue exitoso), y token MFA (si requiere MFA).</returns>
+    public async Task<(SignInResult Result, TokenResponse? Tokens, string? MfaSessionToken)> SignInWithPasswordAsync(
         string email,
         string password,
         CancellationToken cancellationToken = default)
@@ -52,22 +56,16 @@ public sealed class IdentityOrchestrator(
         ArgumentNullException.ThrowIfNull(email);
         ArgumentNullException.ThrowIfNull(password);
 
-        // Paso 1: Buscar al usuario por email
         var user = await userStore.FindByEmailAsync(email.ToLowerInvariant(), cancellationToken);
 
         if (user is null || user.PasswordHash is null)
         {
-            // DIDÁCTICA: Aunque el usuario no exista, NO revelamos esa información.
-            // Para prevenir ataques de enumeración por tiempo, realizamos una verificación ficticia.
-            // Esto hace que el atacante no pueda distinguir por el tiempo de respuesta
-            // si el email existe o no.
             passwordHasher.VerifyDummyPassword(password);
-            
+
             logger.LogDebug("Intento de login fallido: usuario no encontrado para email proporcionado");
-            return (SignInResult.Failed, null);
+            return (SignInResult.Failed, null, null);
         }
 
-        // Paso 2: Verificar si la cuenta está bloqueada
         if (lockoutManager.IsLockedOut(user))
         {
             logger.LogWarning("Intento de login en cuenta bloqueada: {UserId}", user.Id);
@@ -78,19 +76,16 @@ public sealed class IdentityOrchestrator(
                 Metadata = new Dictionary<string, string> { ["reason"] = "lockout_active" }
             }, cancellationToken);
 
-            return (SignInResult.LockedOut, null);
+            return (SignInResult.LockedOut, null, null);
         }
 
-        // Paso 3: Verificar la contraseña
         var verificationResult = passwordHasher.VerifyPassword(user.PasswordHash, password);
 
         if (verificationResult == PasswordVerificationResult.Failed)
         {
-            // Incrementar contador de intentos fallidos
             var failedCount = await userStore.IncrementFailedAccessCountAsync(
                 user.Id, cancellationToken);
 
-            // Verificar si debemos bloquear la cuenta
             await lockoutManager.HandleFailedAttemptAsync(user.Id, failedCount, cancellationToken);
 
             logger.LogDebug("Contraseña incorrecta para usuario {UserId}. Intentos fallidos: {Count}",
@@ -106,23 +101,31 @@ public sealed class IdentityOrchestrator(
                 }
             }, cancellationToken);
 
-            return (SignInResult.Failed, null);
+            return (SignInResult.Failed, null, null);
         }
 
-        // Paso 4: Verificar si se requiere MFA
-        if (user.TwoFactorEnabled)
+        var requiresMfa = _mfaOptions.Enabled && (user.TwoFactorEnabled || user.MfaEnrollmentStatus == MfaEnrollmentStatus.Enrolled || _mfaOptions.RequiredByDefault);
+
+        if (requiresMfa)
         {
-            // TODO: Fase futura - verificar segundo factor
-            return (SignInResult.TwoFactorRequired, null);
+            var method = user.PreferredMfaMethod ?? "totp";
+            var mfaToken = await mfaSessionStore.CreateMfaSessionTokenAsync(
+                user.Id, method, _mfaOptions.MfaSessionTokenMinutes, cancellationToken);
+
+            if (user.MfaEnrollmentStatus != MfaEnrollmentStatus.Enrolled)
+            {
+                logger.LogInformation("Usuario {UserId} requiere enrollment MFA", user.Id);
+                return (SignInResult.TwoFactorRegistrationRequired, null, mfaToken);
+            }
+
+            logger.LogInformation("Usuario {UserId} requiere verificación MFA", user.Id);
+            return (SignInResult.TwoFactorRequired, null, mfaToken);
         }
 
-        // Paso 5: Login exitoso - resetear contador de fallos
         await userStore.ResetFailedAccessCountAsync(user.Id, cancellationToken);
 
-        // Paso 6: Generar tokens
         var tokens = await tokenService.GenerateTokenPairAsync(user, cancellationToken);
 
-        // Paso 7: Almacenar el Refresh Token en la base de datos
         var tokenHash = tokenService.HashRefreshToken(tokens.RefreshToken);
         var refreshEntry = new RefreshTokenEntry
         {
@@ -134,12 +137,78 @@ public sealed class IdentityOrchestrator(
 
         await sessionStore.CreateAsync(refreshEntry, cancellationToken);
 
-        // Paso 8: Disparar evento de éxito
         logger.LogInformation("Login exitoso para usuario {UserId}", user.Id);
         await eventDispatcher.DispatchAsync(new AuthEvent
         {
             EventType = AuthEventType.LoginSuccess,
             UserId = user.Id
+        }, cancellationToken);
+
+        return (SignInResult.Success, tokens, null);
+    }
+
+    /// <summary>
+    /// Completa el login tras verificación MFA exitosa.
+    /// </summary>
+    /// <param name="mfaSessionToken">Token de sesión MFA.</param>
+    /// <param name="mfaCode">Código MFA.</param>
+    /// <param name="cancellationToken">Token de cancelación.</param>
+    /// <returns>Tokens de acceso.</returns>
+    public async Task<(SignInResult Result, TokenResponse? Tokens)> CompleteMfaLoginAsync(
+        string mfaSessionToken,
+        string mfaCode,
+        CancellationToken cancellationToken = default)
+    {
+        var userId = await mfaSessionStore.ValidateMfaSessionTokenAsync(mfaSessionToken, cancellationToken);
+        if (userId is null)
+        {
+            logger.LogWarning("Token MFA inválido o expirado");
+            return (SignInResult.Failed, null);
+        }
+
+        var user = await userStore.FindByIdAsync(userId, cancellationToken);
+        if (user is null)
+        {
+            return (SignInResult.Failed, null);
+        }
+
+        var mfaResult = await mfaService.VerifyAsync(userId, mfaCode, cancellationToken);
+        if (!mfaResult.Success)
+        {
+            return (SignInResult.Failed, null);
+        }
+
+        await mfaSessionStore.ConsumeMfaSessionTokenAsync(mfaSessionToken, cancellationToken);
+
+        await userStore.ResetFailedAccessCountAsync(userId, cancellationToken);
+
+        var customClaims = user.Claims ?? [];
+        if (mfaResult.VerifiedMethod.HasValue)
+        {
+            customClaims["amr"] = "mfa";
+            customClaims["mfa_method"] = mfaResult.VerifiedMethod.Value.ToString().ToLowerInvariant();
+        }
+
+        var userWithClaims = user with { Claims = customClaims };
+        var tokens = await tokenService.GenerateTokenPairAsync(userWithClaims, cancellationToken);
+
+        var tokenHash = tokenService.HashRefreshToken(tokens.RefreshToken);
+        var refreshEntry = new RefreshTokenEntry
+        {
+            TokenHash = tokenHash,
+            FamilyId = Guid.NewGuid().ToString(),
+            UserId = user.Id,
+            ExpiresAtUtc = DateTime.UtcNow.Add(_options.RefreshTokenLifetime)
+        };
+
+        await sessionStore.CreateAsync(refreshEntry, cancellationToken);
+
+        logger.LogInformation("Login con MFA exitoso para usuario {UserId}", userId);
+        await eventDispatcher.DispatchAsync(new AuthEvent
+        {
+            EventType = AuthEventType.LoginSuccess,
+            UserId = userId,
+            Metadata = new Dictionary<string, string> { ["method"] = "password+mfa" }
         }, cancellationToken);
 
         return (SignInResult.Success, tokens);

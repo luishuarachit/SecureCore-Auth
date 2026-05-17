@@ -48,3 +48,7 @@ npm-debug.log*
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# SecureCore specific
+temp/
+auditoria15.0526

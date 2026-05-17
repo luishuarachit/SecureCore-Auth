@@ -30,12 +30,14 @@ public class GoogleOAuthValidator : IOAuthProviderValidator
     private readonly HttpClient _httpClient;
     private readonly JwtSecurityTokenHandler _tokenHandler = new();
 
-    // DIDÁCTICA: Caché estática de llaves JWKS compartida entre todas las instancias.
-    // Usamos SemaphoreSlim (no lock) porque GetSigningKeysAsync es async.
-    // El patrón con tuple nullable + pattern matching moderno (_cache is { Expiry: var exp })
-    // es más legible y seguro que el clásico _cache.HasValue.
-    private static (JsonWebKeySet Keys, DateTime Expiry)? _keysCache;
-    private static readonly SemaphoreSlim _cacheLock = new(1, 1);
+    // DIDÁCTICA: Caché JWKS con Lazy<Task> para evitar cuello de botella en alta concurrencia.
+    // Con SemaphoreSlim(1,1), si 100 requests llegan cuando la caché expiró, 99 esperan mientras
+    // 1 hace el fetch HTTP. Con Lazy<Task>, todas comparten la MISMA tarea en ejecución.
+    //patrón: si hay tarea vigente, todas esperan esa (sin duplicar fetch HTTP).
+    private static Lazy<Task<JsonWebKeySet>>? _jwksRefreshTask;
+    private static DateTime _jwksLastRefreshed;
+    private static readonly TimeSpan JwksCacheDuration = TimeSpan.FromHours(24);
+    private static readonly object _cacheLock = new();
 
     private const string JwksUri = "https://www.googleapis.com/oauth2/v3/certs";
     private const string TokenEndpoint = "https://oauth2.googleapis.com/token";
@@ -155,16 +157,17 @@ public class GoogleOAuthValidator : IOAuthProviderValidator
     }
 
     /// <summary>
-    /// Obtiene las llaves de firma de Google, con caché y soporte para refresh forzado.
+    /// Obtiene las llaves de firma de Google, con caché Lazy<Task> para evitar cuello de botella.
     /// </summary>
     /// <remarks>
-    /// DIDÁCTICA: Usamos SemaphoreSlim para proteger la caché estática compartida entre
-    /// todas las instancias del validador. Esto es seguro en escenarios multi-thread
-    /// (ASP.NET Core atiende cientos de requests concurrentes).
+    /// DIDÁCTICA: Con Lazy<Task>, cuando múltiples requests llegan cuando la caché expiró,
+    /// todas comparten la MISMA tarea en ejecución. Una sola solicitud HTTP se hace,
+    /// y todas las requests esperan esa misma Task. Esto es mucho más eficiente que
+    /// SemaphoreSlim(1,1) donde 99 threads esperaban mientras 1 hacia el trabajo.
     ///
-    /// El patrón de doble comprobación (double-checked locking) minimiza la contención:
-    ///   1. Sin bloqueo: verificamos si la caché es válida (lectura rápida).
-    ///   2. Con bloqueo: si está expirada/inválida, descargamos las llaves una sola vez.
+    /// El patrón:
+    ///   1. Check rápido sin lock: si hay tarea vigente y no expiró, devolver esa Task.
+    ///   2. Con lock: doble-check, si aún necesita refresh, crear nueva Lazy<Task>.
     ///
     /// El parámetro forceRefresh permite invalidar la caché cuando detectamos una
     /// posible rotación de llaves durante la validación de un token (ver retry en
@@ -172,39 +175,50 @@ public class GoogleOAuthValidator : IOAuthProviderValidator
     /// </remarks>
     private async Task<IEnumerable<SecurityKey>> GetSigningKeysAsync(CancellationToken ct, bool forceRefresh = false)
     {
-        // DIDÁCTICA: Double-checked locking. Primera verificación SIN bloqueo para
-        // el caso común (caché válida). Esto evita contención de SemaphoreSlim
-        // en el 99.9% de las requests.
-        if (!forceRefresh && _keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
+        var now = DateTime.UtcNow;
+
+        // Primera verificación SIN lock: caso común (caché válida)
+        if (!forceRefresh && _jwksRefreshTask is { IsValueCreated: true } && now - _jwksLastRefreshed < JwksCacheDuration)
         {
-            return _keysCache.Value.Keys.GetSigningKeys();
-        }
-
-        await _cacheLock.WaitAsync(ct);
-        try
-        {
-            // Segunda verificación CON bloqueo: otro thread pudo haber actualizado
-            // la caché mientras esperábamos el lock.
-            if (!forceRefresh && _keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
-            {
-                return _keysCache.Value.Keys.GetSigningKeys();
-            }
-
-            var response = await _httpClient.GetStringAsync(JwksUri, ct);
-            var jwks = new JsonWebKeySet(response);
-
-            // DIDÁCTICA: Las llaves JWKS se cachean por 24 horas como estándar de la industria.
-            // Google publica sus llaves con una rotación predecible (~24h), pero puede rotarlas
-            // antes por razones de seguridad. El reintento automático en ValidateIdTokenAsync
-            // nos protege contra rotaciones no programadas sin perder el beneficio de rendimiento
-            // de la caché en el 99.9% de los casos.
-            _keysCache = (jwks, DateTime.UtcNow.AddHours(24));
+            var jwks = await _jwksRefreshTask.Value;
             return jwks.GetSigningKeys();
         }
-        finally
+
+        lock (_cacheLock)
         {
-            _cacheLock.Release();
+            // Segunda verificación CON lock: otro thread pudo haber actualizado
+            if (!forceRefresh && _jwksRefreshTask is { IsValueCreated: true } && now - _jwksLastRefreshed < JwksCacheDuration)
+            {
+                // Devolvemos la Task SIN await (ya está en ejecución o completada)
+                // El caller hará await
+                return _jwksRefreshTask.Value.Result.GetSigningKeys();
+            }
+
+            // Necesitamos refresh: crear nueva Lazy<Task>
+            // NOTA: Si forceRefresh, descartamos cualquier tarea anterior
+            _jwksLastRefreshed = now;
+            _jwksRefreshTask = new Lazy<Task<JsonWebKeySet>>(() => FetchJwksAsync(ct));
         }
+
+        // Await de la tarea creada (solo la primera vez se ejecuta el fetch)
+        var jwksResult = await _jwksRefreshTask.Value;
+        return jwksResult.GetSigningKeys();
+    }
+
+    /// <summary>
+    /// Fetch real de JWKS - ejecutado solo una vez por Task Lazy.
+    /// </summary>
+    private async Task<JsonWebKeySet> FetchJwksAsync(CancellationToken ct)
+    {
+        var response = await _httpClient.GetStringAsync(JwksUri, ct);
+        var jwks = new JsonWebKeySet(response);
+
+        // DIDÁCTICA: Las llaves JWKS se cachean por 24 horas como estándar de la industria.
+        // Google publica sus llaves con una rotación predecible (~24h), pero puede rotarlas
+        // antes por razones de seguridad. El reintento automático en ValidateIdTokenAsync
+        // nos protege contra rotaciones no programadas sin perder el beneficio de rendimiento
+        // de la caché en el 99.9% de los casos.
+        return jwks;
     }
 
     public OAuthAuthorizationUrl BuildAuthorizationUrl(string redirectUri, string[] scopes, string state, string nonce)

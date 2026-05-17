@@ -32,8 +32,10 @@ public class AppleOAuthValidator : IOAuthProviderValidator
     private readonly HttpClient _httpClient;
     private readonly JwtSecurityTokenHandler _tokenHandler = new();
 
-    private static (JsonWebKeySet Keys, DateTime Expiry)? _keysCache;
-    private static readonly SemaphoreSlim _cacheLock = new(1, 1);
+    private static Lazy<Task<JsonWebKeySet>>? _jwksRefreshTask;
+    private static DateTime _jwksLastRefreshed;
+    private static readonly TimeSpan JwksCacheDuration = TimeSpan.FromHours(24);
+    private static readonly object _cacheLock = new();
 
     private const string JwksUri = "https://appleid.apple.com/auth/keys";
     private const string TokenEndpoint = "https://appleid.apple.com/auth/token";
@@ -121,12 +123,12 @@ public class AppleOAuthValidator : IOAuthProviderValidator
             }
         }
 
-        // [BUG-02] Apple codifica email_verified como booleano JSON real en algunos flujos
+        // Apple codifica email_verified como booleano JSON real en algunos flujos
         // y como string "true"/"false" en otros. Manejamos ambos casos.
         var emailVerifiedClaim = principal.FindFirst("email_verified")?.Value;
         bool emailVerified = emailVerifiedClaim?.Equals("true", StringComparison.OrdinalIgnoreCase) == true;
 
-        // [MEJORA-03] Validar que sub no sea nulo — es el identificador único del usuario
+        // Validar que sub no sea nulo — es el identificador único del usuario
         var providerKey = principal.FindFirst("sub")?.Value;
         if (string.IsNullOrEmpty(providerKey))
             return OAuthIdentityResult.Failure("missing_sub", "Apple id_token does not contain a 'sub' claim.");
@@ -236,10 +238,9 @@ public class AppleOAuthValidator : IOAuthProviderValidator
         // Duración corta por seguridad. El máximo permitido por Apple es 6 meses.
         var expires = now.AddMinutes(5);
 
-        // [BUG-01 CORREGIDO] NO usar 'using' aquí.
         // ECDsaSecurityKey mantiene una referencia al objeto ECDsa para firmar.
-        // Si se hace Dispose() antes de que WriteToken() termine de firmar,
-        // se lanza ObjectDisposedException o se producen firmas inválidas.
+        // NO usar 'using' aquí porque WriteToken() necesita la referencia
+        // después de que este código termine de ejecutarse.
         // El objeto se libera correctamente al final de este método mediante try/finally.
         var ecdsa = ECDsa.Create();
         try
@@ -300,29 +301,36 @@ public class AppleOAuthValidator : IOAuthProviderValidator
 
     private async Task<IEnumerable<SecurityKey>> GetSigningKeysAsync(CancellationToken ct, bool forceRefresh = false)
     {
-        if (!forceRefresh && _keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
+        var now = DateTime.UtcNow;
+
+        // Primera verificación SIN lock: caso común (caché válida)
+        if (!forceRefresh && _jwksRefreshTask is { IsValueCreated: true } && now - _jwksLastRefreshed < JwksCacheDuration)
         {
-            return _keysCache.Value.Keys.GetSigningKeys();
-        }
-
-        await _cacheLock.WaitAsync(ct);
-        try
-        {
-            if (!forceRefresh && _keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
-            {
-                return _keysCache.Value.Keys.GetSigningKeys();
-            }
-
-            var response = await _httpClient.GetStringAsync(JwksUri, ct);
-            var jwks = new JsonWebKeySet(response);
-
-            _keysCache = (jwks, DateTime.UtcNow.AddHours(24));
+            var jwks = await _jwksRefreshTask.Value;
             return jwks.GetSigningKeys();
         }
-        finally
+
+        lock (_cacheLock)
         {
-            _cacheLock.Release();
+            // Segunda verificación CON lock
+            if (!forceRefresh && _jwksRefreshTask is { IsValueCreated: true } && now - _jwksLastRefreshed < JwksCacheDuration)
+            {
+                return _jwksRefreshTask.Value.Result.GetSigningKeys();
+            }
+
+            // Necesitamos refresh: crear nueva Lazy<Task>
+            _jwksLastRefreshed = now;
+            _jwksRefreshTask = new Lazy<Task<JsonWebKeySet>>(() => FetchJwksAsync(ct));
         }
+
+        var jwksResult = await _jwksRefreshTask.Value;
+        return jwksResult.GetSigningKeys();
+    }
+
+    private async Task<JsonWebKeySet> FetchJwksAsync(CancellationToken ct)
+    {
+        var response = await _httpClient.GetStringAsync(JwksUri, ct);
+        return new JsonWebKeySet(response);
     }
 
     private class AppleTokenResponse

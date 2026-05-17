@@ -1,16 +1,19 @@
+using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using SecureCore.Auth.Abstractions.Interfaces;
 using SecureCore.Auth.Abstractions.Options;
+using SecureCore.Auth.AspNetCore.Options;
 using SecureCore.Auth.Core.Services;
 
 namespace SecureCore.Auth.AspNetCore;
 
 /// <summary>
-/// Configuración combinada para la Fluent API de SecureCore Auth.
+    /// Configuración combinada para la Fluent API de SecureCore Auth.
 /// </summary>
 public class SecureAuthConfiguration
 {
@@ -28,6 +31,11 @@ public class SecureAuthConfiguration
     /// Opciones de Argon2id para hashing de contraseñas.
     /// </summary>
     public Argon2Options Argon2 { get; set; } = new();
+
+    /// <summary>
+    /// Opciones de MFA (Autenticación Multifactor).
+    /// </summary>
+    public MfaOptions Mfa { get; set; } = new();
 }
 
 /// <summary>
@@ -52,6 +60,13 @@ public class SecureAuthBuilder(IServiceCollection services)
     public SecureAuthBuilder AddPasswordAuthentication()
     {
         Services.AddSingleton<IPasswordHasher, Argon2PasswordHasher>();
+
+        Services.AddSingleton<ITotpService, TotpService>();
+        Services.AddSingleton<IMfaSessionStore, JwtMfaSessionService>();
+        Services.AddSingleton<IMfaEncryptionService, AesMfaEncryptionService>();
+        Services.AddScoped<IEmailMfaService, EmailMfaService>();
+        Services.AddScoped<IMfaService, MfaOrchestrator>();
+
         Services.AddScoped<IdentityOrchestrator>();
         return this;
     }
@@ -78,8 +93,8 @@ public class SecureAuthBuilder(IServiceCollection services)
     /// </summary>
     /// <remarks>
     /// DIDÁCTICA: Este método registra el sistema de reset de forma opcional (Opt-in).
-    /// Si el desarrollador no llama a este método, los servicios de reset no se inyectan 
-    /// y los endpoints correspondientes responderán 503, manteniendo la superficie de 
+    /// Si el desarrollador no llama a este método, los servicios de reset no se inyectan
+    /// y los endpoints correspondientes responderán 503, manteniendo la superficie de
     /// ataque al mínimo si la funcionalidad no es requerida.
     /// </remarks>
     /// <param name="configure">Acción opcional para sobrescribir las opciones por defecto.</param>
@@ -103,6 +118,55 @@ public class SecureAuthBuilder(IServiceCollection services)
             .ValidateOnStart();
 
         Services.AddScoped<PasswordResetOrchestrator>();
+        return this;
+    }
+
+    /// <summary>
+    /// Habilita la autenticación multifactor (MFA).
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: Este método registra los servicios de MFA (TOTP, Email, etc.).
+    /// MFA está disabled por defecto para mantener backward compatibility.
+    /// El implementador debe habilitarlo explícitamente en las opciones.
+    ///
+    /// Servicios registrados:
+    /// - ITotpService (TotpService)
+    /// - IMfaSessionStore (JwtMfaSessionService)
+    /// - IMfaEncryptionService (AesMfaEncryptionService)
+    /// - IEmailMfaService (EmailMfaService)
+    /// - IMfaService (MfaOrchestrator)
+    /// </remarks>
+    /// <param name="configure">Acción opcional para configurar opciones MFA.</param>
+    /// <returns>El builder para encadenamiento.</returns>
+    public SecureAuthBuilder AddMfa(Action<MfaOptions>? configure = null)
+    {
+        Services.AddOptions<MfaOptions>()
+            .BindConfiguration(MfaOptions.SectionName)
+            .PostConfigure(opt =>
+            {
+                if (configure is not null)
+                {
+                    var overrides = new MfaOptions();
+                    configure(overrides);
+                    opt.Enabled = overrides.Enabled;
+                    opt.RequiredByDefault = overrides.RequiredByDefault;
+                    opt.AllowedMethods = overrides.AllowedMethods;
+                    opt.AllowUserEnrollment = overrides.AllowUserEnrollment;
+                    opt.AllowUserDisable = overrides.AllowUserDisable;
+                    opt.EnableRecoveryCodes = overrides.EnableRecoveryCodes;
+                    opt.TotpIssuer = overrides.TotpIssuer;
+                    opt.EncryptionKey = overrides.EncryptionKey;
+                }
+            })
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+
+        Services.AddSingleton<ITotpService, TotpService>();
+        Services.AddSingleton<IMfaSessionStore, JwtMfaSessionService>();
+        Services.AddSingleton<IMfaEncryptionService, AesMfaEncryptionService>();
+        Services.AddScoped<IEmailMfaService, EmailMfaService>();
+        Services.AddScoped<IMfaService, MfaOrchestrator>();
+
         return this;
     }
 }
@@ -166,9 +230,17 @@ public static class ServiceCollectionExtensions
                 if (!string.IsNullOrEmpty(config.Jwt.Audience)) opt.Audience = config.Jwt.Audience;
                 if (!string.IsNullOrEmpty(config.Jwt.SigningKey)) opt.SigningKey = config.Jwt.SigningKey;
                 if (!string.IsNullOrEmpty(config.Jwt.Algorithm)) opt.Algorithm = config.Jwt.Algorithm;
+                if (!string.IsNullOrEmpty(config.Jwt.PrivateKey)) opt.PrivateKey = config.Jwt.PrivateKey;
+                if (!string.IsNullOrEmpty(config.Jwt.PublicKey)) opt.PublicKey = config.Jwt.PublicKey;
             })
             .ValidateDataAnnotations()
             .ValidateOnStart();
+
+        // DIDÁCTICA: Registrar validadores personalizados para detección temprana de errores
+        // Esto asegura que cualquier problema de configuración se detecte en startup, no en runtime
+        services.AddSingleton<IValidateOptions<JwtOptions>>(new JwtOptionsValidator());
+        // El segundo validador solo da warnings en producción, no falla
+        services.AddSingleton<IValidateOptions<JwtOptions>>(new JwtProductionSecurityValidator("Development"));
 
         // Registrar y validar opciones de Argon2
         services.AddOptions<Argon2Options>()
@@ -200,6 +272,33 @@ public static class ServiceCollectionExtensions
 
         // Registrar servicios Core
         services.AddSingleton<ITokenService, JwtTokenService>();
+
+        // DIDÁCTICA: Registro del sistema de rate limiting.
+        // Por defecto usamos InMemoryRateLimiter que funciona en single-instance.
+        // Para arquitecturas distribuidas (múltiples servidores), el implementador
+        // debe sobrescribir este registro con una implementación distribuida (Redis, etc.)
+        // La implementación por defecto es ideal para desarrollo y single-server production.
+        services.AddSingleton<IRateLimiter>(sp =>
+        {
+            var authOptions = sp.GetRequiredService<IOptions<SecureAuthOptions>>().Value;
+            var rateLimiterOptions = authOptions.RateLimiter;
+            return new InMemoryRateLimiter(
+                rateLimiterOptions?.MaxAttempts ?? 10,
+                rateLimiterOptions?.Window ?? TimeSpan.FromMinutes(1));
+        });
+
+        // DIDÁCTICA: Registro del mecanismo de locks para operaciones críticas.
+        // Por defecto usamos InMemoryOperationLock que funciona en single-instance.
+        // Para arquitecturas distribuidas (múltiples servidores), el implementador
+        // debe sobrescribir este registro con una implementación distribuida (Redis, etc.)
+        // Si el usuario no provee una implementación, usamos el fallback in-memory.
+        services.AddSingleton<IOperationLock>(sp =>
+        {
+            var authOptions = sp.GetRequiredService<IOptions<SecureAuthOptions>>().Value;
+            var timeout = TimeSpan.FromSeconds(authOptions.OperationLock?.TimeoutSeconds ?? 5);
+            return new InMemoryOperationLock(timeout);
+        });
+
         services.AddScoped<SessionOrchestrator>();
         services.AddScoped<SecurityStampValidator>();
         services.AddScoped<LockoutManager>();
@@ -219,8 +318,7 @@ public static class ServiceCollectionExtensions
                     ValidateIssuerSigningKey = true,
                     ValidIssuer = config.Jwt.Issuer,
                     ValidAudience = config.Jwt.Audience,
-                    IssuerSigningKey = new SymmetricSecurityKey(
-                        Encoding.UTF8.GetBytes(config.Jwt.SigningKey)),
+                    IssuerSigningKey = CreateIssuerSigningKey(config.Jwt),
                     ClockSkew = config.Auth.ClockSkew
                 };
             });
@@ -246,5 +344,50 @@ public static class ServiceCollectionExtensions
     public static IApplicationBuilder UseSecureAuthValidation(this IApplicationBuilder app)
     {
         return app.UseMiddleware<SecurityStampMiddleware>();
+    }
+
+    /// <summary>
+    /// Crea la clave de validación de firma según el algoritmo configurado.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: Para RS256/ES256, usamos la CLAVE PÚBLICA para validar.
+    /// La clave pública puede distribuirse libremente (no es sensible).
+    /// Para HS256, usamos la misma SigningKey (simétrica).
+    /// </remarks>
+    private static SecurityKey CreateIssuerSigningKey(JwtOptions jwtOptions)
+    {
+        var algorithm = jwtOptions.Algorithm.ToUpperInvariant();
+
+        return algorithm switch
+        {
+            "RS256" or "ES256" or "ES384" or "ES512" => CreateAsymmetricSecurityKey(jwtOptions),
+            _ => new SymmetricSecurityKey(Encoding.UTF8.GetBytes(
+                jwtOptions.SigningKey ?? throw new InvalidOperationException(
+                    "JWT Algorithm es HS256 pero no se ha configurado SigningKey.")))
+        };
+    }
+
+    private static SecurityKey CreateAsymmetricSecurityKey(JwtOptions jwtOptions)
+    {
+        if (string.IsNullOrEmpty(jwtOptions.PublicKey))
+        {
+            throw new InvalidOperationException(
+                $"JWT Algorithm es {jwtOptions.Algorithm} pero no se ha configurado Jwt:PublicKey. " +
+                "La clave pública RSA/ECDSA en formato PEM es requerida para validación.");
+        }
+
+        var algorithm = jwtOptions.Algorithm.ToUpperInvariant();
+
+        if (algorithm.StartsWith("RS"))
+        {
+            using var rsa = RSA.Create();
+            rsa.ImportFromPem(jwtOptions.PublicKey);
+            return new RsaSecurityKey(rsa);
+        }
+
+        // ES256, ES384, ES512
+        using var ecdsa = ECDsa.Create();
+        ecdsa.ImportFromPem(jwtOptions.PublicKey);
+        return new ECDsaSecurityKey(ecdsa);
     }
 }

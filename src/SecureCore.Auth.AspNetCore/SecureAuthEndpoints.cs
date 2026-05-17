@@ -1,3 +1,4 @@
+using System.ComponentModel.DataAnnotations;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -44,18 +45,45 @@ public static class SecureAuthEndpoints
         group.MapPost("/login", async (
             LoginRequest request,
             IdentityOrchestrator orchestrator,
+            IRateLimiter rateLimiter,
+            HttpContext httpContext,
             CancellationToken ct) =>
         {
-            var (result, tokens) = await orchestrator.SignInWithPasswordAsync(
+            // DIDÁCTICA: Rate limiting por IP antes de cualquier procesamiento.
+            // Si la IP excede el límite, rechazamos inmediatamente.
+            // Esto evita que un atacante use recursos del servidor para probar muchas cuentas.
+            var ipAddress = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            if (!rateLimiter.IsAllowed(ipAddress))
+            {
+                return Results.Json(
+                    new { error = "too_many_requests", message = "Demasiados intentos. Intenta más tarde." },
+                    statusCode: StatusCodes.Status429TooManyRequests);
+            }
+
+            var (result, tokens, mfaToken) = await orchestrator.SignInWithPasswordAsync(
                 request.Email, request.Password, ct);
 
             if (result.Succeeded && tokens is not null)
             {
+                // DIDÁCTICA: Reset del rate limit en login exitoso.
+                // Importante para no penalizar al usuario legítimo.
+                rateLimiter.Reset(ipAddress);
+
                 return Results.Ok(new
                 {
                     accessToken = tokens.AccessToken,
                     refreshToken = tokens.RefreshToken,
                     expiresAt = tokens.ExpiresAt
+                });
+            }
+
+            if (result.RequiresTwoFactor || result.RequiresTwoFactorRegistration)
+            {
+                return Results.Ok(new
+                {
+                    requiresTwoFactor = true,
+                    requiresTwoFactorRegistration = result.RequiresTwoFactorRegistration,
+                    mfaSessionToken = mfaToken
                 });
             }
 
@@ -116,8 +144,36 @@ public static class SecureAuthEndpoints
         group.MapPost("/logout", async (
             LogoutRequest request,
             SessionOrchestrator session,
+            ISessionStore sessionStore,
+            ITokenService tokenService,
+            HttpContext context,
             CancellationToken ct) =>
         {
+            // SEGURIDAD: Validar que el Refresh Token pertenece al usuario autenticado.
+            // Esto previene que un usuario A revoque la sesión de usuario B (DoS/escalación).
+            var userId = context.User.FindFirst("sub")?.Value
+                         ?? context.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+
+            if (userId is null)
+            {
+                return Results.Unauthorized();
+            }
+
+            // Hashear el token para buscar la entrada en la base de datos
+            var tokenHash = tokenService.HashRefreshToken(request.RefreshToken);
+            var entry = await sessionStore.FindByTokenHashAsync(tokenHash, ct);
+
+            // SEGURIDAD: Si el token existe pero no pertenece al usuario autenticado, rechazar
+            if (entry is not null && entry.UserId != userId)
+            {
+                // Log del intento malicioso
+                System.Diagnostics.Debug.WriteLine(
+                    $"INTENTO DE ESCALACIÓN: Usuario {userId} intentó revocar sesión del usuario {entry.UserId}");
+                
+                return Results.Forbid();  // 403 Forbidden
+            }
+
+            // Logout normal si el token pertenece al usuario autenticado
             await session.LogoutAsync(request.RefreshToken, ct);
             return Results.Ok(new { message = "Sesión cerrada exitosamente." });
         })
@@ -151,9 +207,9 @@ public static class SecureAuthEndpoints
         // ─────────────────────────────────────────────────────────
         //  POST /auth/forgot-password
         // ─────────────────────────────────────────────────────────
-        // DIDÁCTICA: Este endpoint es "ciego". Siempre retorna 200 OK para evitar 
-        // ataques de enumeración (donde un atacante prueba emails para ver cuáles 
-        // están registrados). Además, verifica si el servicio está configurado 
+        // DIDÁCTICA: Este endpoint es "ciego". Siempre retorna 200 OK para evitar
+        // ataques de enumeración (donde un atacante prueba emails para ver cuáles
+        // están registrados). Además, verifica si el servicio está configurado
         // de forma segura para evitar excepciones en tiempo de ejecución.
         group.MapPost("/forgot-password", async (
             ForgotPasswordRequest request,
@@ -219,7 +275,19 @@ public static class SecureAuthEndpoints
 /// <summary>
 /// Solicitud de inicio de sesión.
 /// </summary>
-public record LoginRequest(string Email, string Password);
+/// <remarks>
+/// DIDÁCTICA: Usamos data annotations para validación automática en Minimal APIs.
+/// ASP.NET Core valida el request antes de ejecutar el handler del endpoint.
+/// Si la validación falla, retorna 400 Bad Request automáticamente.
+/// </remarks>
+public record LoginRequest(
+    [property: Required(ErrorMessage = "El email es requerido.")]
+    [property: EmailAddress(ErrorMessage = "El email no tiene formato válido.")]
+    string Email,
+
+    [property: Required(ErrorMessage = "La contraseña es requerida.")]
+    [property: MinLength(1, ErrorMessage = "La contraseña no puede estar vacía.")]
+    string Password);
 
 /// <summary>
 /// Solicitud de rotación de Refresh Token.

@@ -20,6 +20,7 @@ public class PasswordResetOrchestratorTests
     
     // Para simplificar, obviaremos las inyecciones anidadas completas del SessionOrchestrator en favor de una configuración mockeada indirectamente si el diseño lo permitiera - sin embargo, ya que se le requiere inyectar su instancia cruda, inicializaremos la cadena de dependencias requerida.
     private readonly Mock<ITokenService> _tokenServiceMock = new();
+    private readonly Mock<IOperationLock> _operationLockMock = new();
     private readonly Mock<Microsoft.Extensions.Caching.Distributed.IDistributedCache> _cacheMock = new();
     
     private readonly IOptions<PasswordResetOptions> _options;
@@ -46,6 +47,11 @@ public class PasswordResetOrchestratorTests
             NullLogger<SecurityStampValidator>.Instance
         );
 
+        // Configurar el mock del lock para que retorne un Task<IDisposable>
+        _operationLockMock
+            .Setup(x => x.AcquireAsync(It.IsAny<string>(), It.IsAny<TimeSpan>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.FromResult<IDisposable>(new MockOperationLock()));
+
         _sessionOrchestrator = new SessionOrchestrator(
             _sessionStoreMock.Object,
             _userStoreMock.Object,
@@ -53,6 +59,7 @@ public class PasswordResetOrchestratorTests
             stampValidator,
             _eventDispatcherMock.Object,
             _secureAuthOptions,
+            _operationLockMock.Object,
             NullLogger<SessionOrchestrator>.Instance
         );
 
@@ -173,5 +180,10 @@ public class PasswordResetOrchestratorTests
 
         // Assert
         Assert.Equal(PasswordResetResult.InvalidToken, result);
+    }
+
+    private sealed class MockOperationLock : IDisposable
+    {
+        public void Dispose() { }
     }
 }

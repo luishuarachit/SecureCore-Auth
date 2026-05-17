@@ -31,8 +31,10 @@ public class LinkedInOAuthValidator : IOAuthProviderValidator
     private readonly HttpClient _httpClient;
     private readonly JwtSecurityTokenHandler _tokenHandler = new();
 
-    private static (JsonWebKeySet Keys, DateTime Expiry)? _keysCache;
-    private static readonly SemaphoreSlim _cacheLock = new(1, 1);
+    private static Lazy<Task<JsonWebKeySet>>? _jwksRefreshTask;
+    private static DateTime _jwksLastRefreshed;
+    private static readonly TimeSpan JwksCacheDuration = TimeSpan.FromHours(24);
+    private static readonly object _cacheLock = new();
 
     private const string JwksUri = "https://www.linkedin.com/oauth/openid/jwks";
     private const string TokenEndpoint = "https://www.linkedin.com/oauth/v2/accessToken";
@@ -120,29 +122,36 @@ public class LinkedInOAuthValidator : IOAuthProviderValidator
 
     private async Task<IEnumerable<SecurityKey>> GetSigningKeysAsync(CancellationToken ct, bool forceRefresh = false)
     {
-        if (!forceRefresh && _keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
+        var now = DateTime.UtcNow;
+
+        // Primera verificación SIN lock: caso común (caché válida)
+        if (!forceRefresh && _jwksRefreshTask is { IsValueCreated: true } && now - _jwksLastRefreshed < JwksCacheDuration)
         {
-            return _keysCache.Value.Keys.GetSigningKeys();
-        }
-
-        await _cacheLock.WaitAsync(ct);
-        try
-        {
-            if (!forceRefresh && _keysCache.HasValue && _keysCache.Value.Expiry > DateTime.UtcNow)
-            {
-                return _keysCache.Value.Keys.GetSigningKeys();
-            }
-
-            var response = await _httpClient.GetStringAsync(JwksUri, ct);
-            var jwks = new JsonWebKeySet(response);
-
-            _keysCache = (jwks, DateTime.UtcNow.AddHours(24));
+            var jwks = await _jwksRefreshTask.Value;
             return jwks.GetSigningKeys();
         }
-        finally
+
+        lock (_cacheLock)
         {
-            _cacheLock.Release();
+            // Segunda verificación CON lock
+            if (!forceRefresh && _jwksRefreshTask is { IsValueCreated: true } && now - _jwksLastRefreshed < JwksCacheDuration)
+            {
+                return _jwksRefreshTask.Value.Result.GetSigningKeys();
+            }
+
+            // Necesitamos refresh: crear nueva Lazy<Task>
+            _jwksLastRefreshed = now;
+            _jwksRefreshTask = new Lazy<Task<JsonWebKeySet>>(() => FetchJwksAsync(ct));
         }
+
+        var jwksResult = await _jwksRefreshTask.Value;
+        return jwksResult.GetSigningKeys();
+    }
+
+    private async Task<JsonWebKeySet> FetchJwksAsync(CancellationToken ct)
+    {
+        var response = await _httpClient.GetStringAsync(JwksUri, ct);
+        return new JsonWebKeySet(response);
     }
 
     public OAuthAuthorizationUrl BuildAuthorizationUrl(string redirectUri, string[] scopes, string state, string nonce)

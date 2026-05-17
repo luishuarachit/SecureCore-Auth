@@ -12,5 +12,7 @@
   <ItemGroup>
     <PackageReference Include="Fido2" Version="4.0.0" />
     <PackageReference Include="Fido2.Models" Version="4.0.0" />
+    <!-- [SEGURIDAD] CVE-2026-26127: Forzar versión parcheada de Microsoft.Bcl.Memory -->
+    <PackageReference Include="Microsoft.Bcl.Memory" Version="9.0.14" />
   </ItemGroup>
 </Project>

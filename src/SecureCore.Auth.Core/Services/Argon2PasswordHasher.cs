@@ -105,6 +105,139 @@ public sealed class Argon2PasswordHasher(IOptions<Argon2Options> options) : IPas
         _ = VerifyPassword(DummyHash, providedPassword);
     }
 
+    /// <inheritdoc />
+    public async Task<string> HashPasswordAsync(string password, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(password);
+        ArgumentException.ThrowIfNullOrWhiteSpace(password);
+
+        return await Task.Run(() =>
+        {
+            // DIDÁCTICA: Usamos Task.Run para mover la operación CPU-intensiva
+            // al thread pool. Esto evita que el thread de la request HTTP se bloquee
+            // durante ~100-200ms (tiempo típico de Argon2 con parámetros seguros).
+            //
+            // Si no usamos Task.Run y hay muchas autenticaciones simultáneas:
+            // - El thread pool del servidor se satura
+            // - Las nuevas requests deben esperar por un thread libre
+            // - Latencia aumenta drásticamente bajo load
+            //
+            // Trade-off: Task.Run consume un thread del pool, pero lo libera
+            // inmediatamente después de encolar el trabajo. El trabajo pesado
+            // (CPU-bound) se ejecuta en paralelo en otros threads.
+
+            // Generamos un salt aleatorio criptográficamente seguro
+            var salt = RandomNumberGenerator.GetBytes(_options.SaltSize);
+
+            // Configuramos Argon2id con los parámetros definidos en la configuración
+            var argon2 = new Argon2id(Encoding.UTF8.GetBytes(password))
+            {
+                Salt = salt,
+                DegreeOfParallelism = _options.Parallelism,
+                MemorySize = _options.MemorySize,
+                Iterations = _options.Iterations
+            };
+
+            // Generamos el hash (operación CPU-bound)
+            var hash = argon2.GetBytes(_options.HashSize);
+
+            // Retornamos el hash en formato autocontenido estándar
+            return FormatHash(salt, hash);
+        }, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task<PasswordVerificationResult> VerifyPasswordAsync(
+        string hashedPassword, 
+        string providedPassword, 
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(hashedPassword);
+        ArgumentNullException.ThrowIfNull(providedPassword);
+
+        return await Task.Run(() =>
+        {
+            // DIDÁCTICA: Verificación asíncrona de contraseña.
+            // Ejecutamos en Task.Run para no bloquear el thread de la request.
+            //
+            // NOTA: Argon2 usa toda la memoria configurada (default 64MB) y todas
+            // las iteraciones (default 3) en CADA verificación. Esto es intencional:
+            // es lo que hace Argon2 seguro contra ataques de fuerza bruta.
+            //
+            // Bajo alta carga:
+            // - Muchas verificaciones simultáneas = alto consumo de CPU y memoria
+            // - Considere reducir MemorySize si tiene muchos usuarios activos
+            // - Implemente rate limiting para proteger el servicio
+
+            // Extraemos los parámetros del hash almacenado
+            if (!TryParseHash(hashedPassword, out var storedParams))
+            {
+                return PasswordVerificationResult.Failed;
+            }
+
+            // Recalculamos el hash con la contraseña proporcionada y el salt original
+            var argon2 = new Argon2id(Encoding.UTF8.GetBytes(providedPassword))
+            {
+                Salt = storedParams.Salt,
+                DegreeOfParallelism = storedParams.Parallelism,
+                MemorySize = storedParams.MemorySize,
+                Iterations = storedParams.Iterations
+            };
+
+            var computedHash = argon2.GetBytes(storedParams.Hash.Length);
+
+            // Comparación en tiempo constante para evitar ataques de timing
+            if (!CryptographicOperations.FixedTimeEquals(computedHash, storedParams.Hash))
+            {
+                return PasswordVerificationResult.Failed;
+            }
+
+            // Verificamos si los parámetros del hash almacenado coinciden con los actuales
+            // Si no coinciden, el hash es válido pero se debería regenerar con los nuevos parámetros
+            if (NeedsRehash(storedParams))
+            {
+                return PasswordVerificationResult.SuccessRehashNeeded;
+            }
+
+            return PasswordVerificationResult.Success;
+        }, cancellationToken);
+    }
+
+    /// <inheritdoc />
+    public async Task VerifyDummyPasswordAsync(string providedPassword, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(providedPassword);
+
+        // DIDÁCTICA: Versión asíncrona de la verificación ficticia.
+        // Mantiene el mismo tiempo de ejecución que una verificación real
+        // para prevenir ataques de enumeración por timing.
+        await VerifyDummyPasswordAsyncImplementation(cancellationToken);
+    }
+
+    /// <summary>
+    /// Implementación interna de la verificación ficticia async.
+    /// </summary>
+    private async Task VerifyDummyPasswordAsyncImplementation(CancellationToken cancellationToken)
+    {
+        await Task.Run(() =>
+        {
+            // Ejecutamos la misma operación que en la versión síncrona
+            // pero dentro de Task.Run para no bloquear el thread de la request
+            _ = TryParseHash(DummyHash, out var storedParams);
+
+            var argon2 = new Argon2id(Encoding.UTF8.GetBytes("dummy_password_for_timing"))
+            {
+                Salt = storedParams.Salt,
+                DegreeOfParallelism = storedParams.Parallelism,
+                MemorySize = storedParams.MemorySize,
+                Iterations = storedParams.Iterations
+            };
+
+            var computedHash = argon2.GetBytes(storedParams.Hash.Length);
+            CryptographicOperations.FixedTimeEquals(computedHash, storedParams.Hash);
+        }, cancellationToken);
+    }
+
     /// <summary>
     /// Formatea el hash en el estándar de Argon2 para almacenamiento.
     /// </summary>

@@ -111,4 +111,54 @@ public interface IUserStore
         string userId,
         DateTimeOffset? lockoutEnd,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Actualiza el estado de enrollment MFA del usuario.
+    /// </summary>
+    /// <param name="userId">ID del usuario.</param>
+    /// <param name="status">Nuevo estado de enrollment.</param>
+    /// <param name="preferredMethod">Método preferido (nullable).</param>
+    /// <param name="cancellationToken">Token de cancelación.</param>
+    Task UpdateMfaEnrollmentAsync(
+        string userId,
+        Models.MfaEnrollmentStatus status,
+        string? preferredMethod = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Guarda el secreto TOTP cifrado del usuario.
+    /// </summary>
+    /// <param name="userId">ID del usuario.</param>
+    /// <param name="encryptedSecret">Secreto cifrado (AES-256-GCM).</param>
+    /// <param name="cancellationToken">Token de cancelación.</param>
+    Task SetTotpSecretAsync(
+        string userId,
+        string encryptedSecret,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Guarda los códigos de recuperación (hashes).
+    /// </summary>
+    /// <param name="userId">ID del usuario.</param>
+    /// <param name="codeHashes">Lista de hashes SHA-256.</param>
+    /// <param name="cancellationToken">Token de cancelación.</param>
+    Task SetRecoveryCodesAsync(
+        string userId,
+        List<string> codeHashes,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Incrementa el contador de intentos fallidos de verificación MFA.
+    /// </summary>
+    /// <param name="userId">ID del usuario.</param>
+    /// <param name="cancellationToken">Token de cancelación.</param>
+    /// <returns>El número actualizado de intentos fallidos.</returns>
+    Task<int> IncrementMfaFailedAttemptsAsync(string userId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Resetea el contador de intentos fallidos de MFA.
+    /// </summary>
+    /// <param name="userId">ID del usuario.</param>
+    /// <param name="cancellationToken">Token de cancelación.</param>
+    Task ResetMfaFailedAttemptsAsync(string userId, CancellationToken cancellationToken = default);
 }

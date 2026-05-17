@@ -20,6 +20,7 @@ public class SessionOrchestratorTests
     private readonly ITokenService _tokenService;
     private readonly IAuthEventDispatcher _eventDispatcher;
     private readonly SecurityStampValidator _stampValidator;
+    private readonly IOperationLock _operationLock;
 
     public SessionOrchestratorTests()
     {
@@ -27,6 +28,9 @@ public class SessionOrchestratorTests
         _userStore = Substitute.For<IUserStore>();
         _tokenService = Substitute.For<ITokenService>();
         _eventDispatcher = Substitute.For<IAuthEventDispatcher>();
+        _operationLock = Substitute.For<IOperationLock>();
+        _operationLock.AcquireAsync(Arg.Any<string>(), Arg.Any<TimeSpan>(), Arg.Any<CancellationToken>())
+            .Returns(new MockLock());
 
         var authOptions = Options.Create(new SecureAuthOptions
         {
@@ -46,6 +50,7 @@ public class SessionOrchestratorTests
             _stampValidator,
             _eventDispatcher,
             authOptions,
+            _operationLock,
             NullLogger<SessionOrchestrator>.Instance);
     }
 
@@ -199,5 +204,10 @@ public class SessionOrchestratorTests
         await _eventDispatcher.Received(1).DispatchAsync(
             Arg.Is<AuthEvent>(e => e.EventType == AuthEventType.Logout),
             Arg.Any<CancellationToken>());
+    }
+
+    private sealed class MockLock : IDisposable
+    {
+        public void Dispose() { }
     }
 }

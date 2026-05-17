@@ -40,28 +40,43 @@ public sealed class SecurityStampMiddleware(
 
             var securityStamp = context.User.FindFirstValue("ssv");
 
-            if (userId is not null && securityStamp is not null)
+            // SEGURIDAD: Si userId o ssv son nulos, el token está malformado.
+            // Un token JWT válido debe contener SIEMPRE estos claims en usuarios autenticados.
+            if (userId is null || securityStamp is null)
             {
-                var isValid = await stampValidator.ValidateAsync(
-                    userId,
-                    securityStamp,
-                    context.RequestAborted);
+                logger.LogWarning(
+                    "Token JWT malformado: userId={UserId}, ssv={SecurityStamp}. Rechazando solicitud.",
+                    userId ?? "null", securityStamp ?? "null");
 
-                if (!isValid)
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                context.Response.ContentType = "application/json";
+                await context.Response.WriteAsJsonAsync(new
                 {
-                    logger.LogWarning(
-                        "Security Stamp inválido para usuario {UserId}. Sesión revocada.",
-                        userId);
+                    error = "invalid_token",
+                    message = "Token inválido o malformado. Por favor, inicia sesión nuevamente."
+                }, context.RequestAborted);
+                return;
+            }
 
-                    context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-                    context.Response.ContentType = "application/json";
-                    await context.Response.WriteAsJsonAsync(new
-                    {
-                        error = "session_revoked",
-                        message = "La sesión ha sido revocada. Inicie sesión nuevamente."
-                    }, context.RequestAborted);
-                    return;
-                }
+            var isValid = await stampValidator.ValidateAsync(
+                userId,
+                securityStamp,
+                context.RequestAborted);
+
+            if (!isValid)
+            {
+                logger.LogWarning(
+                    "Security Stamp inválido para usuario {UserId}. Sesión revocada.",
+                    userId);
+
+                context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                context.Response.ContentType = "application/json";
+                await context.Response.WriteAsJsonAsync(new
+                {
+                    error = "session_revoked",
+                    message = "La sesión ha sido revocada. Inicie sesión nuevamente."
+                }, context.RequestAborted);
+                return;
             }
         }
 

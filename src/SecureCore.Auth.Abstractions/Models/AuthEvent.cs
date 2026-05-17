@@ -76,5 +76,17 @@ public enum AuthEventType
     PasswordResetRequested,
 
     /// <summary>Contraseña restablecida exitosamente.</summary>
-    PasswordResetCompleted
+    PasswordResetCompleted,
+
+    /// <summary>Usuario completó el enrollment MFA.</summary>
+    MfaEnrolled,
+
+    /// <summary>Verificación MFA exitosa durante login.</summary>
+    MfaVerificationSuccess,
+
+    /// <summary>Verificación MFA fallida durante login.</summary>
+    MfaVerificationFailed,
+
+    /// <summary>Usuario deshabilitó MFA.</summary>
+    MfaDisabled
 }
