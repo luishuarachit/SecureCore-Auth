@@ -35,6 +35,7 @@ public sealed class JwtTokenService(
 {
     private readonly JwtOptions _jwtOptions = jwtOptions.Value;
     private readonly SecureAuthOptions _authOptions = authOptions.Value;
+    private readonly HashSet<string> _systemClaims = BuildEffectiveSystemClaims(jwtOptions.Value);
     private SigningCredentials? _cachedSigningCredentials;
 
     // DIDÁCTICA: Conjunto de claims que el sistema gestiona internamente y no deben
@@ -45,24 +46,49 @@ public sealed class JwtTokenService(
     // NOTA: "amr" y "acr" NO están en esta lista para permitir que el implementador
     // los agregue si desea indicar el método de autenticación (amr: pwd, oauth, webauthn)
     // o el nivel de confianza (acr). Si los necesita, agréguelos en UserIdentity.Claims.
-    private static readonly HashSet<string> SystemClaims =
-    [
-        JwtRegisteredClaimNames.Sub,
-        JwtRegisteredClaimNames.Email,
-        JwtRegisteredClaimNames.Jti,
-        JwtRegisteredClaimNames.Iss,
-        JwtRegisteredClaimNames.Aud,
-        JwtRegisteredClaimNames.Exp,
-        JwtRegisteredClaimNames.Iat,
-        JwtRegisteredClaimNames.Nbf,
-        JwtRegisteredClaimNames.Name,
-        "ssv",
-        "role",
-        "roles",
-        "auth_time",
-        "azp",
-        "nonce",
-    ];
+    //
+    // NOTA: Si necesitas usar RBAC con [Authorize(Roles = "...")], agrega "role" y
+    // "roles" a JwtOptions.AllowedSystemClaims. Esto remueve esos claims del bloqueo.
+    // Asegúrate de que tu UserStore sea la fuente de verdad para los roles.
+    private static HashSet<string> BuildDefaultSystemClaims()
+    {
+        return
+        [
+            JwtRegisteredClaimNames.Sub,
+            JwtRegisteredClaimNames.Email,
+            JwtRegisteredClaimNames.Jti,
+            JwtRegisteredClaimNames.Iss,
+            JwtRegisteredClaimNames.Aud,
+            JwtRegisteredClaimNames.Exp,
+            JwtRegisteredClaimNames.Iat,
+            JwtRegisteredClaimNames.Nbf,
+            JwtRegisteredClaimNames.Name,
+            "ssv",
+            "role",
+            "roles",
+            "auth_time",
+            "azp",
+            "nonce",
+        ];
+    }
+
+    private static HashSet<string> BuildEffectiveSystemClaims(JwtOptions jwtOptions)
+    {
+        var claims = BuildDefaultSystemClaims();
+
+        // DIDÁCTICA: Permitir que el implementador desbloquee claims específicos
+        // del conjunto SystemClaims para casos como RBAC donde necesita inyectar
+        // "role" o "roles" desde UserIdentity.Claims.
+        if (jwtOptions.AllowedSystemClaims.Count > 0)
+        {
+            foreach (var allowed in jwtOptions.AllowedSystemClaims)
+            {
+                claims.Remove(allowed);
+            }
+        }
+
+        return claims;
+    }
 
     /// <inheritdoc />
     public Task<TokenResponse> GenerateTokenPairAsync(
@@ -121,7 +147,7 @@ public sealed class JwtTokenService(
                 // (o un atacante que comprometa el UserStore) pueda inyectar claims
                 // como 'sub' (suplantación de identidad), 'role' (escalación de
                 // privilegios) o 'ssv' (bypass de revocación global).
-                if (!SystemClaims.Contains(kv.Key))
+                if (!_systemClaims.Contains(kv.Key))
                 {
                     claims[kv.Key] = kv.Value;
                 }

@@ -29,6 +29,7 @@ Gestiona los parámetros del esquema de autenticación Bearer mediante JWT.
 | `PrivateKey` | `string?` | Clave privada RSA/ECDSA en formato PEM. | Requiere Algorithm=RS256 o ES256. |
 | `PublicKey` | `string?` | Clave pública RSA/ECDSA en formato PEM. | Requiere Algorithm=RS256 o ES256. |
 | `Algorithm` | `string` | Algoritmo de firma (Default: `RS256`). | Valores: HS256, RS256, ES256, ES384, ES512 |
+| `AllowedSystemClaims` | `HashSet<string>` | Claims del sistema que se permiten inyectar desde `UserIdentity.Claims`. | Default: vacío (todos bloqueados). Agregar `"role"`/`"roles"` para RBAC. |
 
 > **NOTA DE SEGURIDAD**: Se recomienda **RS256 o ES256** para producción. Estos algoritmos usan criptografía asimétrica:
 > - **HS256 (simétrico)**: La misma clave firma y valida. Si se filtra, cualquiera puede伪造 tokens.
@@ -320,16 +321,78 @@ Interfaz que deben implementar todos los validadores de proveedores.
 
 ### 7.5. Protección de Claims JWT (v2.4.0)
 
-`JwtTokenService` incluye un blocklist estático `SystemClaims` que previene la inyección de 17 claims sensibles desde `UserIdentity.Claims`:
+`JwtTokenService` incluye un blocklist `SystemClaims` que previene la inyección de claims sensibles desde `UserIdentity.Claims`. A partir de v3.1.0, este blocklist es configurable mediante `JwtOptions.AllowedSystemClaims`:
 
+- **Por defecto**: Todos los system claims están bloqueados, incluyendo `role` y `roles`.
+- **Para habilitar RBAC**: Agregar `"role"` y `"roles"` a `AllowedSystemClaims`. Esto permite inyectar roles desde `UserIdentity.Claims` para usar `[Authorize(Roles = "...")]`.
+
+```csharp
+// Habilitar RBAC en el JWT
+options.Jwt.AllowedSystemClaims = new HashSet<string> { "role", "roles" };
+```
+
+**Claims bloqueados por defecto:**
 - **Identidad**: `sub`, `email`, `name`
 - **Control de token**: `jti`, `iss`, `aud`, `exp`, `iat`, `nbf`
 - **Seguridad**: `ssv` (SecurityStamp), `nonce`
 - **Autorización**: `role`, `roles`, `auth_time`, `amr`, `acr`, `azp`
 
-Cualquier intento de sobrescribir estos claims via `UserIdentity.Claims` es ignorado silenciosamente.
+Cualquier intento de sobrescribir estos claims via `UserIdentity.Claims` es ignorado silenciosamente, a menos que se permita explícitamente en `AllowedSystemClaims`.
 
-### 7.6. CI/CD (v2.4.0)
+### 7.6. OAuth SignIn Options (v3.1.0)
+
+`OAuthSignInOptions` incluye nuevas propiedades para soportar autenticación basada en cookies HttpOnly:
+
+| Propiedad | Tipo | Default | Descripción |
+| :--- | :--- | :--- | :--- |
+| `SetCookiesDirectly` | `bool` | false | Si es true, setea cookies HttpOnly y redirige al SPA en lugar de retornar JSON. |
+| `CookieDomain` | `string?` | null | Dominio de las cookies (ej. ".example.com" para subdominios). |
+| `PostLoginRedirectUrl` | `string?` | null | URL de redirección post-login para el SPA. Default: "/". |
+
+```csharp
+// Activar cookies HttpOnly para OAuth
+services.Configure<OAuthSignInOptions>(opts =>
+{
+    opts.SetCookiesDirectly = true;
+    opts.CookieDomain = ".example.com";
+    opts.PostLoginRedirectUrl = "https://app.example.com/dashboard";
+});
+```
+
+### 7.7. IMfaCodeStore — Almacenamiento de Códigos MFA (v3.1.0)
+
+Nueva interfaz para almacenar y validar códigos MFA temporales (email):
+
+```csharp
+public interface IMfaCodeStore
+{
+    Task StoreCodeHashAsync(string key, string codeHash, TimeSpan ttl, CancellationToken ct);
+    Task<bool> ValidateAndRemoveCodeAsync(string key, string code, CancellationToken ct);
+}
+```
+
+**Implementación por defecto**: `DistributedCacheMfaCodeStore` usa `IDistributedCache` (compatible con MemoryCache, Redis, SQL Server).
+
+**Seguridad**:
+- Los códigos se almacenan como hash SHA-256, nunca en texto plano.
+- La validación usa `CryptographicOperations.FixedTimeEquals` para prevenir timing attacks.
+- Los códigos son single-use: se eliminan tras el primer intento de validación.
+
+### 7.8. OAuthClaimHelper — Extracción Segura de Claims OIDC
+
+Helper estático en `SecureCore.Auth.OAuth` que extrae claims de `JwtSecurityToken` preservando los tipos cortos originales del JWT (evitando el mapeo a URIs que hace `ClaimsPrincipal`):
+
+```csharp
+// Uso en validadores OAuth:
+var sub = OAuthClaimHelper.GetClaim(jwt, "sub");
+var email = OAuthClaimHelper.GetClaim(jwt, "email");
+```
+
+### 7.9. Normalización de URLs OAuth (v3.1.0)
+
+El endpoint `/authorize` ahora normaliza automáticamente la `redirectUri` eliminando el prefijo `www.` del host para coincidir con los redirect URIs registrados en los OAuth providers.
+
+### 7.10. CI/CD (v2.4.0)
 
 El repositorio incluye un flujo de GitHub Actions (`.github/workflows/ci.yml`) que se ejecuta en push/PR a `main`:
 - Compilación (`dotnet build --configuration Release`)

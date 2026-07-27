@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using Microsoft.IdentityModel.Tokens;
 using SecureCore.Auth.Abstractions.Interfaces;
 using SecureCore.Auth.Abstractions.Models;
+using SecureCore.Auth.OAuth;
 
 namespace SecureCore.Auth.OAuth.LinkedIn;
 
@@ -111,10 +112,10 @@ public class LinkedInOAuthValidator : IOAuthProviderValidator
         return new OAuthIdentityResult
         {
             Succeeded = true,
-            ProviderKey = principal.FindFirst("sub")?.Value,
-            Email = principal.FindFirst("email")?.Value,
-            DisplayName = principal.FindFirst("name")?.Value,
-            AvatarUrl = principal.FindFirst("picture")?.Value,
+            ProviderKey = OAuthClaimHelper.GetClaim(jwt, "sub"),
+            Email = OAuthClaimHelper.GetClaim(jwt, "email"),
+            DisplayName = OAuthClaimHelper.GetClaim(jwt, "name"),
+            AvatarUrl = OAuthClaimHelper.GetClaim(jwt, "picture"),
             EmailVerified = true,
             IdToken = idToken
         };

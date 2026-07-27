@@ -20,6 +20,9 @@ namespace SecureCore.Auth.AspNetCore;
 /// </summary>
 public static class OAuthEndpoints
 {
+    private const string AccessTokenCookie = "auth_access_token";
+    private const string RefreshTokenCookie = "auth_refresh_token";
+
     public static RouteGroupBuilder MapSecureOAuthEndpoints(
         this IEndpointRouteBuilder endpoints,
         string prefix = "/auth/oauth")
@@ -35,6 +38,7 @@ public static class OAuthEndpoints
             OAuthTokenRequest request,
             OAuthOrchestrator orchestrator,
             IOptions<OAuthSignInOptions> options,
+            HttpContext context,
             CancellationToken ct) =>
         {
             var valRequest = new OAuthValidationRequest { IdToken = request.IdToken };
@@ -42,13 +46,7 @@ public static class OAuthEndpoints
 
             if (result.Succeeded && result.Tokens is not null)
             {
-                return Results.Ok(new
-                {
-                    accessToken = result.Tokens.AccessToken,
-                    refreshToken = result.Tokens.RefreshToken,
-                    expiresAt = result.Tokens.ExpiresAt,
-                    isNewUser = result.IsNewUser
-                });
+                return HandleOAuthSuccess(options.Value, result, null, context);
             }
 
             if (result.IsLockedOut)
@@ -69,22 +67,26 @@ public static class OAuthEndpoints
             HttpContext context,
             IServiceProvider serviceProvider,
             IOAuthStateStore stateStore,
+            IOptions<OAuthSignInOptions> options,
             CancellationToken ct) =>
         {
+            // DIDÁCTICA: Normalizamos la URL eliminando "www." para coincidir
+            // con los redirect URIs registrados en los OAuth providers.
+            var normalizedRedirectUri = NormalizeUrl(redirectUri);
+
             var validators = serviceProvider.GetServices<IOAuthProviderValidator>();
             var validator = validators.FirstOrDefault(v => v.ProviderName.Equals(provider, StringComparison.OrdinalIgnoreCase));
 
             if (validator is null)
                 return Results.NotFound(new { error = "provider_not_found" });
 
-            // Generar State y Nonce seguros
             var state = GenerateSecureRandomString(32);
             var nonce = GenerateSecureRandomString(32);
 
-            var entry = new OAuthStateEntry(nonce, provider, redirectUri, DateTimeOffset.UtcNow);
+            var entry = new OAuthStateEntry(nonce, provider, normalizedRedirectUri, DateTimeOffset.UtcNow);
             await stateStore.SaveAsync(state, entry, TimeSpan.FromMinutes(10), ct);
 
-            var authUrl = validator.BuildAuthorizationUrl(redirectUri, [], state, nonce);
+            var authUrl = validator.BuildAuthorizationUrl(normalizedRedirectUri, [], state, nonce);
             return Results.Redirect(authUrl.Url);
         })
         .WithName("OAuthAuthorize")
@@ -101,9 +103,9 @@ public static class OAuthEndpoints
             OAuthOrchestrator orchestrator,
             IOptions<OAuthSignInOptions> options,
             IOAuthStateStore stateStore,
+            HttpContext context,
             CancellationToken ct) =>
         {
-            // Consumir el state (obtener y borrar de forma atómica)
             var stateEntry = await stateStore.ConsumeAsync(state, ct);
             if (stateEntry is null || !stateEntry.Provider.Equals(provider, StringComparison.OrdinalIgnoreCase))
             {
@@ -122,13 +124,7 @@ public static class OAuthEndpoints
 
             if (result.Succeeded && result.Tokens is not null)
             {
-                return Results.Ok(new
-                {
-                    accessToken = result.Tokens.AccessToken,
-                    refreshToken = result.Tokens.RefreshToken,
-                    expiresAt = result.Tokens.ExpiresAt,
-                    isNewUser = result.IsNewUser
-                });
+                return HandleOAuthSuccess(options.Value, result, stateEntry.RedirectUri, context);
             }
 
             if (result.IsLockedOut)
@@ -162,6 +158,99 @@ public static class OAuthEndpoints
         .RequireAuthorization();
 
         return group;
+    }
+
+    private static string NormalizeUrl(string url)
+    {
+        if (string.IsNullOrEmpty(url))
+            return url;
+
+        // DIDÁCTICA: Eliminamos "www." del host para normalizar URLs.
+        // Muchos OAuth providers (Google, Microsoft) son estrictos con el matching
+        // exacto del redirect_uri. Si registraste "https://example.com/callback"
+        // pero el usuario llegó desde "https://www.example.com", el OAuth provider
+        // rechazará la solicitud.
+        if (Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            if (uri.Host.StartsWith("www.", StringComparison.OrdinalIgnoreCase))
+            {
+                var builder = new UriBuilder(uri)
+                {
+                    Host = uri.Host[4..] // Remover "www."
+                };
+                return builder.Uri.ToString().TrimEnd('/');
+            }
+        }
+
+        return url;
+    }
+
+    /// <summary>
+    /// Maneja el caso de éxito del flujo OAuth.
+    /// Si SetCookiesDirectly está habilitado, setea cookies HttpOnly y redirige al SPA.
+    /// Si no, retorna JSON con los tokens (comportamiento por defecto).
+    /// </summary>
+    private static IResult HandleOAuthSuccess(
+        OAuthSignInOptions signInOptions,
+        OAuthSignInResult result,
+        string? redirectUri,
+        HttpContext context)
+    {
+        if (signInOptions.SetCookiesDirectly)
+        {
+            var cookieOptions = new CookieOptions
+            {
+                HttpOnly = true,
+                Secure = true,
+                SameSite = SameSiteMode.Strict,
+                Expires = result.Tokens!.ExpiresAt.UtcDateTime
+            };
+
+            if (!string.IsNullOrEmpty(signInOptions.CookieDomain))
+            {
+                cookieOptions.Domain = signInOptions.CookieDomain;
+            }
+
+            context.Response.Cookies.Append(AccessTokenCookie, result.Tokens.AccessToken, cookieOptions);
+
+            // DIDÁCTICA: El refresh token tiene una vida más larga que el access token.
+            // Su cookie debe expirar según el RefreshTokenLifetime, no el ExpiresAt del
+            // access token (que es solo 15 minutos).
+            var refreshCookieOptions = new CookieOptions
+            {
+                HttpOnly = true,
+                Secure = true,
+                SameSite = SameSiteMode.Strict
+            };
+
+            if (!string.IsNullOrEmpty(signInOptions.CookieDomain))
+            {
+                refreshCookieOptions.Domain = signInOptions.CookieDomain;
+            }
+
+            context.Response.Cookies.Append(RefreshTokenCookie, result.Tokens.RefreshToken, refreshCookieOptions);
+
+            var postLoginUrl = signInOptions.PostLoginRedirectUrl ?? "/";
+
+            // Agregamos isNewUser como query param para que el SPA pueda mostrar onboarding
+            if (result.IsNewUser)
+            {
+                postLoginUrl = postLoginUrl.Contains('?')
+                    ? $"{postLoginUrl}&isNewUser=true"
+                    : $"{postLoginUrl}?isNewUser=true";
+            }
+
+            return Results.Redirect(postLoginUrl);
+        }
+
+        // Comportamiento por defecto: retornar tokens en JSON
+        return Results.Ok(new
+        {
+            accessToken = result.Tokens!.AccessToken,
+            refreshToken = result.Tokens.RefreshToken,
+            expiresAt = result.Tokens.ExpiresAt,
+            isNewUser = result.IsNewUser
+        });
     }
 
     private static string GenerateSecureRandomString(int bytes)

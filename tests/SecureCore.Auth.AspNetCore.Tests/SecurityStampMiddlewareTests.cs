@@ -50,6 +50,7 @@ public class SecurityStampMiddlewareTests
     public async Task InvokeAsync_AuthenticatedWithoutSsvClaim_CallsNext()
     {
         // Arrange — usuario autenticado pero sin claim "ssv"
+        // El middleware rechaza tokens sin ssv como "malformados" (401).
         var context = new DefaultHttpContext();
         var identity = new ClaimsIdentity([
             new Claim("sub", "u1"),
@@ -66,8 +67,9 @@ public class SecurityStampMiddlewareTests
         // Act
         await middleware.InvokeAsync(context);
 
-        // Assert — sin claim ssv, pasa sin validación
-        Assert.True(nextCalled);
+        // Assert — sin claim ssv, middleware rechaza con 401 (token malformado)
+        Assert.False(nextCalled);
+        Assert.Equal(StatusCodes.Status401Unauthorized, context.Response.StatusCode);
     }
 
     [Fact]

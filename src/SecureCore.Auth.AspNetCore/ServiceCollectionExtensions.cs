@@ -3,6 +3,7 @@ using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using SecureCore.Auth.Abstractions.Interfaces;
@@ -65,6 +66,13 @@ public class SecureAuthBuilder(IServiceCollection services)
         Services.AddSingleton<IMfaSessionStore, JwtMfaSessionService>();
         Services.AddSingleton<IMfaEncryptionService, AesMfaEncryptionService>();
         Services.AddScoped<IEmailMfaService, EmailMfaService>();
+
+        // DIDÁCTICA: IMfaCodeStore con IDistributedCache es la implementación
+        // por defecto para almacenar códigos MFA temporales. Si necesitas un
+        // backend diferente (ej. base de datos), implementa IMfaCodeStore y
+        // regístralo ANTES de llamar a AddPasswordAuthentication().
+        Services.TryAddScoped<IMfaCodeStore, DistributedCacheMfaCodeStore>();
+
         Services.AddScoped<IMfaService, MfaOrchestrator>();
 
         Services.AddScoped<IdentityOrchestrator>();
@@ -165,6 +173,7 @@ public class SecureAuthBuilder(IServiceCollection services)
         Services.AddSingleton<IMfaSessionStore, JwtMfaSessionService>();
         Services.AddSingleton<IMfaEncryptionService, AesMfaEncryptionService>();
         Services.AddScoped<IEmailMfaService, EmailMfaService>();
+        Services.TryAddScoped<IMfaCodeStore, DistributedCacheMfaCodeStore>();
         Services.AddScoped<IMfaService, MfaOrchestrator>();
 
         return this;
@@ -378,15 +387,20 @@ public static class ServiceCollectionExtensions
 
         var algorithm = jwtOptions.Algorithm.ToUpperInvariant();
 
+        // IMPORTANTE: No usar 'using' aquí porque la instancia de RSA debe
+        // permanecer viva mientras exista la RsaSecurityKey que la referencia.
+        // Si se dispone, las operaciones de validación JWT posteriores
+        // lanzarán ObjectDisposedException.
         if (algorithm.StartsWith("RS"))
         {
-            using var rsa = RSA.Create();
+            var rsa = RSA.Create();
             rsa.ImportFromPem(jwtOptions.PublicKey);
             return new RsaSecurityKey(rsa);
         }
 
         // ES256, ES384, ES512
-        using var ecdsa = ECDsa.Create();
+        // IMPORTANTE: No usar 'using' aquí — misma razón que RSA.
+        var ecdsa = ECDsa.Create();
         ecdsa.ImportFromPem(jwtOptions.PublicKey);
         return new ECDsaSecurityKey(ecdsa);
     }

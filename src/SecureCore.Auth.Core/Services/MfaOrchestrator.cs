@@ -36,6 +36,7 @@ public sealed class MfaOrchestrator : IMfaService
     private readonly IUserStore _userStore;
     private readonly ITotpService _totpService;
     private readonly IEmailMfaService _emailMfaService;
+    private readonly IMfaCodeStore _mfaCodeStore;
     private readonly IMfaSessionStore _mfaSessionStore;
     private readonly IPasswordHasher _passwordHasher;
     private readonly IMfaEncryptionService _encryptionService;
@@ -47,6 +48,7 @@ public sealed class MfaOrchestrator : IMfaService
         IUserStore userStore,
         ITotpService totpService,
         IEmailMfaService emailMfaService,
+        IMfaCodeStore mfaCodeStore,
         IMfaSessionStore mfaSessionStore,
         IPasswordHasher passwordHasher,
         IMfaEncryptionService encryptionService,
@@ -57,6 +59,7 @@ public sealed class MfaOrchestrator : IMfaService
         _userStore = userStore;
         _totpService = totpService;
         _emailMfaService = emailMfaService;
+        _mfaCodeStore = mfaCodeStore;
         _mfaSessionStore = mfaSessionStore;
         _passwordHasher = passwordHasher;
         _encryptionService = encryptionService;
@@ -100,6 +103,18 @@ public sealed class MfaOrchestrator : IMfaService
             case MfaMethod.Email:
                 emailCode = _emailMfaService.GenerateCode(_options.EmailCodeLength);
                 await _emailMfaService.SendCodeAsync(user.Email, emailCode, cancellationToken);
+
+                // DIDÁCTICA: Almacenamos el hash SHA-256 del código en caché
+                // para poder validarlo después. El código se elimina tras el primer
+                // intento de validación (single-use).
+                var emailCodeHash = ComputeHash(emailCode);
+                var codeKey = GetEmailCodeKey(userId);
+                await _mfaCodeStore.StoreCodeHashAsync(
+                    codeKey,
+                    emailCodeHash,
+                    TimeSpan.FromMinutes(_options.EmailCodeLifetimeMinutes),
+                    cancellationToken);
+
                 await _userStore.UpdateMfaEnrollmentAsync(userId, MfaEnrollmentStatus.Pending, "email", cancellationToken);
                 break;
 
@@ -137,13 +152,17 @@ public sealed class MfaOrchestrator : IMfaService
         }
         else if (method == "email")
         {
-            isValid = true;
+            var codeKey = GetEmailCodeKey(userId);
+            isValid = await _mfaCodeStore.ValidateAndRemoveCodeAsync(codeKey, code, cancellationToken);
         }
         else
         {
             return false;
         }
 
+        // DIDÁCTICA: Solo retornamos false si el código es inválido.
+        // Si el código no existe (expirado/ya usado), ValidateAndRemoveCodeAsync
+        // retorna false, y aquí lo tratamos como fallo de validación.
         if (!isValid)
         {
             _logger.LogWarning("Código de enrollment MFA inválido para usuario {UserId}", userId);
@@ -208,7 +227,8 @@ public sealed class MfaOrchestrator : IMfaService
         }
         else if (method == "email")
         {
-            isValid = true;
+            var codeKey = GetEmailCodeKey(userId);
+            isValid = await _mfaCodeStore.ValidateAndRemoveCodeAsync(codeKey, code, cancellationToken);
         }
         else
         {
@@ -263,11 +283,24 @@ public sealed class MfaOrchestrator : IMfaService
         if (user.MfaEnrollmentStatus != MfaEnrollmentStatus.Enrolled)
             return false;
 
-        var verificationResult = _passwordHasher.VerifyPassword(user.PasswordHash ?? "", password);
-        if (verificationResult == Abstractions.Interfaces.PasswordVerificationResult.Failed)
+        // DIDÁCTICA: Solo verificamos la contraseña si el usuario realmente tiene una.
+        // Usuarios registrados vía OAuth (Google, Microsoft, etc.) no tienen contraseña
+        // (PasswordHash es null). Exigirles contraseña impediría deshabilitar MFA.
+        // Para usuarios con contraseña, SIEMPRE se requiere verificarla.
+        if (user.PasswordHash is not null)
         {
-            _logger.LogWarning("Intento de deshabilitar MFA con contraseña incorrecta para usuario {UserId}", userId);
-            return false;
+            if (string.IsNullOrEmpty(password))
+            {
+                _logger.LogWarning("Intento de deshabilitar MFA sin contraseña para usuario {UserId} que sí tiene password", userId);
+                return false;
+            }
+
+            var verificationResult = _passwordHasher.VerifyPassword(user.PasswordHash, password);
+            if (verificationResult == Abstractions.Interfaces.PasswordVerificationResult.Failed)
+            {
+                _logger.LogWarning("Intento de deshabilitar MFA con contraseña incorrecta para usuario {UserId}", userId);
+                return false;
+            }
         }
 
         await _userStore.UpdateMfaEnrollmentAsync(userId, MfaEnrollmentStatus.Disabled, null, cancellationToken);
@@ -340,5 +373,18 @@ public sealed class MfaOrchestrator : IMfaService
         var bytes = Encoding.UTF8.GetBytes(input);
         var hash = SHA256.HashData(bytes);
         return Convert.ToHexString(hash).ToLowerInvariant();
+    }
+
+    /// <summary>
+    /// Genera la clave de caché para un código MFA de email.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: La clave incluye el userId para aislamiento entre usuarios.
+    /// Cada nuevo enrollment sobrescribe el código anterior, y la validación
+    /// elimina el código de la caché (single-use).
+    /// </remarks>
+    private static string GetEmailCodeKey(string userId)
+    {
+        return $"mfa_email_code:{userId}";
     }
 }

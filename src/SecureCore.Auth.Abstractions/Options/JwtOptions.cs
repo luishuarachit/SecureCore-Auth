@@ -75,4 +75,21 @@ public class JwtOptions
     /// </remarks>
     [Required]
     public string Algorithm { get; set; } = "RS256";
+
+    /// <summary>
+    /// Claims del sistema que el implementador quiere DESBLOQUEAR para inyectar
+    /// desde UserIdentity.Claims. Por defecto vacío (todos los system claims bloqueados).
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: Por defecto, el framework bloquea claims como "role" y "roles" para
+    /// evitar que un UserStore comprometido pueda inyectarlos y escalar privilegios.
+    ///
+    /// Si tu aplicación necesita RBAC estándar con [Authorize(Roles = "...")], agrega
+    /// "role" y "roles" a esta lista. Esto es seguro siempre que confíes en tu UserStore
+    /// como fuente de verdad para los roles del usuario.
+    ///
+    /// ADVERTENCIA: Solo desbloquea claims si entiendes las implicaciones de seguridad.
+    /// Si un atacante compromete el UserStore, podría inyectar claims arbitrarios.
+    /// </remarks>
+    public HashSet<string> AllowedSystemClaims { get; set; } = [];
 }

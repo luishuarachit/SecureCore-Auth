@@ -12,6 +12,7 @@ using System.Threading.Tasks;
 using Microsoft.IdentityModel.Tokens;
 using SecureCore.Auth.Abstractions.Interfaces;
 using SecureCore.Auth.Abstractions.Models;
+using SecureCore.Auth.OAuth;
 
 namespace SecureCore.Auth.OAuth.Apple;
 
@@ -125,11 +126,11 @@ public class AppleOAuthValidator : IOAuthProviderValidator
 
         // Apple codifica email_verified como booleano JSON real en algunos flujos
         // y como string "true"/"false" en otros. Manejamos ambos casos.
-        var emailVerifiedClaim = principal.FindFirst("email_verified")?.Value;
+        var emailVerifiedClaim = OAuthClaimHelper.GetClaim(jwt, "email_verified");
         bool emailVerified = emailVerifiedClaim?.Equals("true", StringComparison.OrdinalIgnoreCase) == true;
 
         // Validar que sub no sea nulo — es el identificador único del usuario
-        var providerKey = principal.FindFirst("sub")?.Value;
+        var providerKey = OAuthClaimHelper.GetClaim(jwt, "sub");
         if (string.IsNullOrEmpty(providerKey))
             return OAuthIdentityResult.Failure("missing_sub", "Apple id_token does not contain a 'sub' claim.");
 
@@ -137,10 +138,10 @@ public class AppleOAuthValidator : IOAuthProviderValidator
         {
             Succeeded = true,
             ProviderKey = providerKey,
-            Email = principal.FindFirst("email")?.Value,
+            Email = OAuthClaimHelper.GetClaim(jwt, "email"),
             // Apple solo envía el nombre en el PRIMER inicio de sesión.
             // En inicios de sesión subsecuentes, esta claim estará ausente.
-            DisplayName = principal.FindFirst("name")?.Value,
+            DisplayName = OAuthClaimHelper.GetClaim(jwt, "name"),
             EmailVerified = emailVerified,
             IdToken = idToken
         };

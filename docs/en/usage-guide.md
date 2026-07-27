@@ -722,6 +722,25 @@ app.MapSecureOAuthEndpoints();
 > [!TIP]
 > **Security v2.3+**: All OIDC providers now validate the `nonce` cryptographically and cache public keys (JWKS) with **auto-retry** on key rotation. If a provider rotates its signing keys (e.g. Google's 24h rotation), the library automatically fetches fresh keys and retries validation before declaring the token invalid — ensuring zero downtime. Facebook uses `appsecret_proof` (HMAC-SHA256) for server-to-server calls.
 
+#### HttpOnly Cookies (v3.1.0)
+
+**Scenario**: Instead of receiving tokens as JSON to store in localStorage, you can use HttpOnly cookies (more secure against XSS):
+
+```csharp
+builder.Services.AddSecureAuth(options => { ... })
+    .AddOAuth(oauth =>
+    {
+        oauth.ConfigureOptions(opts =>
+        {
+            opts.SetCookiesDirectly = true;
+            opts.CookieDomain = ".example.com";    // Share across subdomains
+            opts.PostLoginRedirectUrl = "https://app.example.com/dashboard";
+        });
+    });
+```
+
+When `SetCookiesDirectly = true`, the OAuth callback sets `auth_access_token` and `auth_refresh_token` cookies (HttpOnly, Secure, SameSite=Strict) and redirects to the SPA configured in `PostLoginRedirectUrl`.
+
 ---
 
 ### Use Case 8: Multi-Factor Authentication (MFA)

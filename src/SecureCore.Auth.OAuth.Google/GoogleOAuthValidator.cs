@@ -9,6 +9,7 @@ using System.Net.Http.Json;
 using Microsoft.IdentityModel.Tokens;
 using SecureCore.Auth.Abstractions.Interfaces;
 using SecureCore.Auth.Abstractions.Models;
+using SecureCore.Auth.OAuth;
 
 namespace SecureCore.Auth.OAuth.Google;
 
@@ -141,16 +142,16 @@ public class GoogleOAuthValidator : IOAuthProviderValidator
             }
         }
 
-        var emailVerifiedStr = principal.FindFirst("email_verified")?.Value;
+        var emailVerifiedStr = OAuthClaimHelper.GetClaim(jwt, "email_verified");
         bool.TryParse(emailVerifiedStr, out var emailVerified);
 
         return new OAuthIdentityResult
         {
             Succeeded = true,
-            ProviderKey = principal.FindFirst("sub")?.Value,
-            Email = principal.FindFirst("email")?.Value,
-            DisplayName = principal.FindFirst("name")?.Value,
-            AvatarUrl = principal.FindFirst("picture")?.Value,
+            ProviderKey = OAuthClaimHelper.GetClaim(jwt, "sub"),
+            Email = OAuthClaimHelper.GetClaim(jwt, "email"),
+            DisplayName = OAuthClaimHelper.GetClaim(jwt, "name"),
+            AvatarUrl = OAuthClaimHelper.GetClaim(jwt, "picture"),
             EmailVerified = emailVerified,
             IdToken = idToken
         };

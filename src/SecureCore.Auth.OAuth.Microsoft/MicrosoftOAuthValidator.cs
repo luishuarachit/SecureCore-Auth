@@ -10,6 +10,7 @@ using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
 using SecureCore.Auth.Abstractions.Interfaces;
 using SecureCore.Auth.Abstractions.Models;
+using SecureCore.Auth.OAuth;
 
 namespace SecureCore.Auth.OAuth.Microsoft;
 
@@ -136,14 +137,14 @@ public class MicrosoftOAuthValidator : IOAuthProviderValidator
         // Microsoft recomienda usar 'preferred_username' para el email en v2.0
         var email = principal.FindFirst("preferred_username")?.Value
                  ?? principal.FindFirst(ClaimTypes.Email)?.Value
-                 ?? principal.FindFirst("email")?.Value;
+                 ?? OAuthClaimHelper.GetClaim(jwtToken, "email");
 
         return new OAuthIdentityResult
         {
             Succeeded = true,
             ProviderKey = jwtToken.Subject, // OID o Sub
             Email = email,
-            DisplayName = principal.FindFirst("name")?.Value,
+            DisplayName = OAuthClaimHelper.GetClaim(jwtToken, "name"),
             EmailVerified = true,
             IdToken = idToken
         };

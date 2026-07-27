@@ -98,6 +98,39 @@ public class OAuthSignInOptions
     public bool AllowImplicitRegistration { get; set; }
     public bool PersistProviderTokens { get; set; }
     public Type? UserFactoryType { get; set; }
+
+    /// <summary>
+    /// Si es true, el callback OAuth setea cookies HttpOnly con los tokens
+    /// y redirige al SPA en lugar de retornar JSON en el body.
+    /// Por defecto: false (comportamiento actual, retorna JSON).
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: Las cookies HttpOnly son más seguras que almacenar tokens en
+    /// localStorage porque no son accesibles desde JavaScript, previniendo
+    /// robo de tokens vía XSS. Combinado con SameSite=Strict, también previene
+    /// ataques CSRF.
+    ///
+    /// Cuando se activa, debes configurar también PostLoginRedirectUrl
+    /// para redirigir al SPA después del login exitoso.
+    /// </remarks>
+    public bool SetCookiesDirectly { get; set; } = false;
+
+    /// <summary>
+    /// Dominio de las cookies (ej: ".textea.me" para compartir entre subdominios).
+    /// Si es null, las cookies se emiten sin dominio explícito (solo para el host actual).
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: Usar un dominio con punto inicial (ej. ".example.com") permite
+    /// que las cookies sean accesibles desde todos los subdominios
+    /// (app.example.com, api.example.com).
+    /// </remarks>
+    public string? CookieDomain { get; set; }
+
+    /// <summary>
+    /// URL a la que redirigir después de un login OAuth exitoso cuando
+    /// SetCookiesDirectly es true. Si es null, se usa la raíz "/".
+    /// </summary>
+    public string? PostLoginRedirectUrl { get; set; }
 }
 
 /// <summary>

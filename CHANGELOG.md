@@ -5,6 +5,63 @@ Todas los cambios notables en este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 y este proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.0] - 2026-07-27
+
+### Corregido
+- **RSA/ECDsa descartados en `CreateIssuerSigningKey`** (P3-19):
+  - `RSA.Create()` y `ECDsa.Create()` se llamaban dentro de `using`, descartando las claves inmediatamente. Las operaciones JWT posteriores lanzaban `ObjectDisposedException`.
+  - Se removió `using` y se agregó comentario explicativo (misma práctica que `JwtTokenService`).
+
+- **Claims OAuth OIDC no encontrados por mapeo de tipos** (P3-20):
+  - `principal.FindFirst("sub")` retornaba `null` porque `ClaimsPrincipal` mapea los claims del JWT a URIs completas (`ClaimTypes.NameIdentifier`).
+  - Afectaba a Google, Apple, Microsoft y LinkedIn — `ProviderKey`, `Email`, `DisplayName` y `AvatarUrl` eran `null`.
+  - Se creó `OAuthClaimHelper.GetClaim(jwt, "sub")` como helper compartido en `SecureCore.Auth.OAuth`.
+  - Se aplicó el fix a los 4 validadores afectados.
+
+- **Email MFA aceptaba cualquier código** (P3-21) — CRÍTICO:
+  - `CompleteEnrollmentAsync` y `VerifyAsync` asignaban `isValid = true` incondicionalmente para `method == "email"`.
+  - Ahora los códigos se almacenan como hash SHA-256 y se validan con `CryptographicOperations.FixedTimeEquals`.
+
+- **Usuarios OAuth sin contraseña no podían deshabilitar MFA** (P3-22):
+  - `DisableAsync` ahora solo verifica contraseña si `user.PasswordHash is not null`.
+  - Para usuarios con contraseña, SIEMPRE se requiere verificarla.
+
+- **Test pre-existente corregido**:
+  - `InvokeAsync_AuthenticatedWithoutSsvClaim_CallsNext` esperaba `nextCalled = true` pero el middleware correctamente rechaza tokens sin `ssv` con 401. El test ahora valida el comportamiento correcto.
+
+### Añadido
+- **`IMfaCodeStore` — Almacenamiento de códigos MFA** (P3-21):
+  - Nueva interfaz en `Abstractions` para almacenar y validar códigos MFA temporales.
+  - `DistributedCacheMfaCodeStore`: implementación por defecto usando `IDistributedCache`.
+  - Registro automático en DI vía `AddPasswordAuthentication()` y `AddMfa()`.
+  - Códigos almacenados como SHA-256, validados con `FixedTimeEquals`, single-use.
+
+- **`OAuthClaimHelper` — Extracción segura de claims OIDC** (P3-20):
+  - Helper estático en `SecureCore.Auth.OAuth` que lee claims de `JwtSecurityToken` preservando tipos cortos.
+  - Previene el bug de mapeo de tipos en todos los validadores futuros.
+
+- **Cookies HttpOnly en callback OAuth** (P3-23):
+  - Nuevas opciones en `OAuthSignInOptions`: `SetCookiesDirectly`, `CookieDomain`, `PostLoginRedirectUrl`.
+  - Cuando se activa, el callback OAuth setea cookies HttpOnly y redirige al SPA.
+  - Backward compatible: comportamiento por defecto sigue retornando JSON.
+
+- **`JwtOptions.AllowedSystemClaims` — RBAC configurable** (P3-24):
+  - `SystemClaims` ahora es configurable. Agregar `"role"`/`"roles"` a `AllowedSystemClaims` permite RBAC con `[Authorize(Roles = "...")]`.
+  - Seguro por defecto: todos los system claims bloqueados.
+
+- **Normalización de URLs OAuth** (P3-25):
+  - El endpoint `/authorize` ahora elimina `www.` del host para coincidir con redirect URIs registrados en los providers.
+
+### Modificado
+- **`MfaOrchestrator`** ahora recibe `IMfaCodeStore` como dependencia (constructor actualizado).
+- **`ServiceCollectionExtensions`**: `AddMfa` y `AddPasswordAuthentication` registran `IMfaCodeStore`.
+- **`SecurityStampMiddlewareTests`**: test corregido para reflejar comportamiento real del middleware.
+
+### Documentación
+- Actualizadas referencias técnicas (ES/EN) con nuevas interfaces, opciones y secciones:
+  - `JwtOptions.AllowedSystemClaims`, `IMfaCodeStore`, `OAuthClaimHelper`, `OAuthSignInOptions` extendido.
+- Actualizadas guías de uso (ES/EN) con ejemplos de cookies HttpOnly.
+
 ## [3.0.0] - 2026-05-17
 
 ### Añadido
