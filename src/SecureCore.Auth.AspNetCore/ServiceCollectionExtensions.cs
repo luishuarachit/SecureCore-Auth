@@ -298,6 +298,8 @@ public static class ServiceCollectionExtensions
                 if (!string.IsNullOrEmpty(config.Jwt.Algorithm)) opt.Algorithm = config.Jwt.Algorithm;
                 if (!string.IsNullOrEmpty(config.Jwt.PrivateKey)) opt.PrivateKey = config.Jwt.PrivateKey;
                 if (!string.IsNullOrEmpty(config.Jwt.PublicKey)) opt.PublicKey = config.Jwt.PublicKey;
+                if (config.Jwt.AllowedSystemClaims.Count > 0)
+                    opt.AllowedSystemClaims = new HashSet<string>(config.Jwt.AllowedSystemClaims);
             })
             .ValidateDataAnnotations()
             .ValidateOnStart();

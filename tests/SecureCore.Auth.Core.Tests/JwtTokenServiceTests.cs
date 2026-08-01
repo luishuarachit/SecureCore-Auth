@@ -132,4 +132,64 @@ public class JwtTokenServiceTests
         await Assert.ThrowsAsync<ArgumentNullException>(
             () => _tokenService.GenerateTokenPairAsync(null!));
     }
+
+    [Fact]
+    public void RoleClaim_WithAllowedSystemClaims_AppearsInJwt()
+    {
+        var svc = CreateTokenService(["role", "roles"]);
+        var user = _testUser with { Claims = new() { ["role"] = "admin" } };
+
+        var token = svc.GenerateAccessToken(user);
+        var claims = ReadClaims(token);
+
+        Assert.Contains(claims, c => c.Type == "role" && c.Value == "admin");
+    }
+
+    [Fact]
+    public void RoleClaim_WithoutAllowedSystemClaims_IsBlocked()
+    {
+        var user = _testUser with { Claims = new() { ["role"] = "admin" } };
+
+        var token = _tokenService.GenerateAccessToken(user);
+        var claims = ReadClaims(token);
+
+        Assert.DoesNotContain(claims, c => c.Type == "role");
+    }
+
+    [Fact]
+    public void CustomClaim_AlwaysFlows_RegardlessOfSystemClaims()
+    {
+        var user = _testUser with { Claims = new() { ["department"] = "engineering" } };
+
+        var token = _tokenService.GenerateAccessToken(user);
+        var claims = ReadClaims(token);
+
+        Assert.Contains(claims, c => c.Type == "department" && c.Value == "engineering");
+    }
+
+    private JwtTokenService CreateTokenService(HashSet<string>? allowedSystemClaims = null)
+    {
+        var jwtOptions = Options.Create(new JwtOptions
+        {
+            Issuer = "test-issuer",
+            Audience = "test-audience",
+            SigningKey = "TestSigningKey_MustBeAtLeast32Characters!",
+            Algorithm = "HS256",
+            AllowedSystemClaims = allowedSystemClaims ?? []
+        });
+
+        var authOptions = Options.Create(new SecureAuthOptions
+        {
+            AccessTokenLifetime = TimeSpan.FromMinutes(15)
+        });
+
+        return new JwtTokenService(jwtOptions, authOptions);
+    }
+
+    private static IEnumerable<System.Security.Claims.Claim> ReadClaims(string jwt)
+    {
+        var handler = new System.IdentityModel.Tokens.Jwt.JwtSecurityTokenHandler();
+        var parsed = handler.ReadJwtToken(jwt);
+        return parsed.Claims;
+    }
 }

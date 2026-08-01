@@ -5,6 +5,13 @@ Todas los cambios notables en este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 y este proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.4] - 2026-08-01
+
+### Corregido
+- **`AllowedSystemClaims` del Fluent API no se propagaba a `JwtOptions` — RBAC completamente roto**:
+  - El `PostConfigure` de `JwtOptions` copiaba `Issuer`, `Audience`, `SigningKey`, `Algorithm`, `PrivateKey` y `PublicKey` desde el Fluent API, pero omitía `AllowedSystemClaims`. Como la sección `SecureAuth:Jwt` rara vez se define en `appsettings.json`, la lista efectiva quedaba vacía → `role`/`roles` siempre bloqueados → `[Authorize(Roles = "...")]` y policies `RequireClaim(ClaimTypes.Role, ...)` nunca funcionaban (siempre 403).
+  - Fix: ahora el `PostConfigure` también copia `AllowedSystemClaims`. Sin breaking changes: si no se configura, la lista vacía mantiene el comportamiento seguro por defecto.
+
 ## [3.1.3] - 2026-08-01
 
 ### Corregido
