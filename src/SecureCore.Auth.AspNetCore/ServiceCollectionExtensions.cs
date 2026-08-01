@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using SecureCore.Auth.Abstractions.Interfaces;
@@ -14,7 +15,7 @@ using SecureCore.Auth.Core.Services;
 namespace SecureCore.Auth.AspNetCore;
 
 /// <summary>
-    /// Configuración combinada para la Fluent API de SecureCore Auth.
+/// Configuración combinada para la Fluent API de SecureCore Auth.
 /// </summary>
 public class SecureAuthConfiguration
 {
@@ -66,6 +67,11 @@ public class SecureAuthBuilder(IServiceCollection services)
         Services.AddSingleton<IMfaSessionStore, JwtMfaSessionService>();
         Services.AddSingleton<IMfaEncryptionService, AesMfaEncryptionService>();
         Services.AddScoped<IEmailMfaService, EmailMfaService>();
+
+        // DIDÁCTICA: IEmailService (transporte de email) es responsabilidad del
+        // implementador. Se registra un default NullEmailService que lanza al usarse;
+        // si el consumidor registra el suyo ANTES, TryAdd lo respeta.
+        AddEmailServiceDefault(Services);
 
         // DIDÁCTICA: IMfaCodeStore con IDistributedCache es la implementación
         // por defecto para almacenar códigos MFA temporales. Si necesitas un
@@ -173,10 +179,61 @@ public class SecureAuthBuilder(IServiceCollection services)
         Services.AddSingleton<IMfaSessionStore, JwtMfaSessionService>();
         Services.AddSingleton<IMfaEncryptionService, AesMfaEncryptionService>();
         Services.AddScoped<IEmailMfaService, EmailMfaService>();
+        AddEmailServiceDefault(Services);
         Services.TryAddScoped<IMfaCodeStore, DistributedCacheMfaCodeStore>();
         Services.AddScoped<IMfaService, MfaOrchestrator>();
 
         return this;
+    }
+
+    /// <summary>
+    /// Registra una implementación por defecto de IEmailService si el consumidor
+    /// no proporcionó la suya. NullEmailService lanza al intentar enviar.
+    /// </summary>
+    private static void AddEmailServiceDefault(IServiceCollection services)
+    {
+        services.TryAddScoped<IEmailService, NullEmailService>();
+    }
+}
+
+/// <summary>
+/// Implementación por defecto de IEmailService usada cuando el consumidor
+/// no registra una implementación real.
+/// </summary>
+/// <remarks>
+/// DIDÁCTICA: A diferencia de NullExternalTokenStore (donde el no-op es un modo
+/// legítimo "identity-only"), un envío de email silencioso sería catastrófico para
+/// MFA: el factor parecería activo y los códigos nunca llegarían. Por eso este
+/// default LANZA InvalidOperationException al intentar enviar, forzando al
+/// implementador a registrar su propio IEmailService ANTES de AddMfa().
+/// </remarks>
+internal sealed class NullEmailService : IEmailService
+{
+    private readonly ILogger<NullEmailService> _logger;
+
+    public NullEmailService(ILogger<NullEmailService> logger)
+    {
+        _logger = logger;
+    }
+
+    public Task SendAsync(
+        string to,
+        string subject,
+        string? htmlBody = null,
+        string? textBody = null,
+        CancellationToken cancellationToken = default)
+    {
+        _logger.LogWarning(
+            "NullEmailService: intento de envío a {To} sin IEmailService registrado. " +
+            "El MFA por email no puede funcionar sin un servicio de envío real. " +
+            "Registra tu implementación de IEmailService ANTES de AddMfa()/AddPasswordAuthentication().",
+            to);
+
+        throw new InvalidOperationException(
+            "No se ha registrado una implementación de IEmailService. " +
+            "El envío de emails (requerido por EmailMfaService) necesita un servicio real. " +
+            "Registra tu implementación antes de AddMfa()/AddPasswordAuthentication(): " +
+            "services.AddScoped<IEmailService, MyEmailService>();");
     }
 }
 

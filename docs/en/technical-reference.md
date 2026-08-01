@@ -247,6 +247,12 @@ builder.Services.AddSecureAuth(options =>
 .AddMfa();
 ```
 
+**Email MFA requirement:** The default `IEmailMfaService` (`EmailMfaService`) sends codes through `IEmailService`. SecureCore registers a `NullEmailService` default (via `TryAddScoped`) that **throws** `InvalidOperationException` when used. Register your own `IEmailService` **before** `AddMfa()`/`AddPasswordAuthentication()`:
+```csharp
+services.AddScoped<IEmailService, MyEmailService>();
+builder.Services.AddSecureAuth(...).AddMfa();
+```
+
 **Registration:**
 ```csharp
 // After successful password login with MFA enabled:
@@ -312,6 +318,8 @@ services.AddSecureAuth(options => { ... })
 1. `app.UseAuthentication()`: Establishes `ClaimsPrincipal` from the JWT.
 2. `app.UseSecureAuthValidation()`: Active SecurityStamp validation middleware (against cache/storage) and session revocation.
 3. `app.UseAuthorization()`: Access policy evaluation.
+
+> **DIDÁCTICA — Scoped resolution**: `SecurityStampValidator` is **scoped** and is resolved by the middleware **per request** (via `InvokeAsync`), not in its constructor. Middleware instances are constructed once for the whole application; injecting a scoped service into the constructor would create a **captive dependency** (a scoped instance held by the root provider) and fail under `ValidateOnBuild`/`ValidateScopes`. Resolving it per request guarantees the validator always runs with a valid request scope.
 
 ### 5.3. Automatic Endpoints
 `app.MapSecureAuthEndpoints("/base-path")` registers:
@@ -416,13 +424,16 @@ Any attempt to override these via `UserIdentity.Claims` is silently ignored, unl
 
 ### 7.6. OAuth SignIn Options (v3.1.0)
 
-`OAuthSignInOptions` includes new properties for HttpOnly cookie-based authentication:
+`OAuthSignInOptions` includes new properties for HttpOnly cookie-based authentication and OAuth `redirect_uri` configuration:
 
 | Property | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `SetCookiesDirectly` | `bool` | false | If true, sets HttpOnly cookies and redirects to SPA instead of returning JSON. |
 | `CookieDomain` | `string?` | null | Cookie domain (e.g., ".example.com" for subdomains). |
 | `PostLoginRedirectUrl` | `string?` | null | Post-login redirect URL for the SPA. Default: "/". |
+| `PublicBaseUrl` | `string?` | null | Public API base used as the provider `redirect_uri`. When null, it is derived from the request (scheme + host). Set it explicitly when the API sits behind a load balancer / TLS termination. |
+| `CallbackPrefix` | `string` | `/auth/oauth` | Route prefix where OAuth endpoints are mapped. The provider `redirect_uri` is built as `{base}{CallbackPrefix}/{provider}/callback`. |
+| `AllowedPostLoginHosts` | `string[]` | `[]` | Extra hosts allowed as SPA post-login targets. The `redirectUri` query param of `/authorize` is accepted only if HTTPS and its host is in this list or matches `PostLoginRedirectUrl`. Prevents open redirect. |
 
 ```csharp
 // Enable HttpOnly cookies for OAuth
@@ -463,9 +474,15 @@ var sub = OAuthClaimHelper.GetClaim(jwt, "sub");
 var email = OAuthClaimHelper.GetClaim(jwt, "email");
 ```
 
-### 7.9. OAuth URL Normalization (v3.1.0)
+### 7.9. OAuth redirect_uri and URL Normalization
 
-The `/authorize` endpoint now automatically normalizes the `redirectUri` by removing the `www.` prefix from the host to match the redirect URIs registered with OAuth providers.
+The OAuth provider `redirect_uri` is **always the API callback URL** (`{base}{CallbackPrefix}/{provider}/callback`), never the SPA URL. Providers (Google, Microsoft, etc.) require it to match exactly the one registered in their console, both on the `/authorize` request and on the token exchange in `/callback`.
+
+The callback URL is computed once in `/authorize` (using `PublicBaseUrl` or derived from the request) and stored in the OAuth state so `/callback` reuses the exact same value (no drift).
+
+The `/authorize` endpoint normalizes the `redirectUri` by removing the `www.` prefix from the host to match the redirect URIs registered with OAuth providers. The `redirectUri` query param is the **SPA post-login target** (not the provider `redirect_uri`); it is accepted only if HTTPS and its host is in `AllowedPostLoginHosts` or matches `PostLoginRedirectUrl`, otherwise the request fails with `400 invalid_redirect_uri`.
+
+> **Deployment requirement**: register the exact API callback URL in each provider console (e.g. `https://api.example.com/auth/oauth/google/callback`).
 
 ### 7.10. CI/CD (v2.4.0)
 

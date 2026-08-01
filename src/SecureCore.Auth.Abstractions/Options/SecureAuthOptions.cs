@@ -17,7 +17,7 @@ public class SecureAuthOptions
     /// </summary>
     public const string SectionName = "SecureAuth";
 
-/// <summary>
+    /// <summary>
     /// Tiempo de vida del Access Token (JWT). Por defecto: 15 minutos.
     /// </summary>
     /// <remarks>

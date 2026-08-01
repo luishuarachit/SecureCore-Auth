@@ -44,7 +44,7 @@ public class OAuthOrchestrator(
         OAuthSignInOptions signInOptions,
         CancellationToken ct = default)
     {
-        var validator = validators.FirstOrDefault(v => 
+        var validator = validators.FirstOrDefault(v =>
             v.ProviderName.Equals(provider, StringComparison.OrdinalIgnoreCase));
 
         if (validator is null)
@@ -160,7 +160,7 @@ public class OAuthOrchestrator(
 
         // Emit tokens
         var tokens = await tokenService.GenerateTokenPairAsync(user, ct);
-        
+
         var tokenHash = tokenService.HashRefreshToken(tokens.RefreshToken);
         var refreshEntry = new RefreshTokenEntry
         {

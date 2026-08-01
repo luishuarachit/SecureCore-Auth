@@ -1,5 +1,11 @@
+using System.Net;
 using System.Security.Claims;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Caching.Distributed;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using NSubstitute;
 using SecureCore.Auth.Abstractions.Interfaces;
@@ -37,10 +43,10 @@ public class SecurityStampMiddlewareTests
         RequestDelegate next = _ => { nextCalled = true; return Task.CompletedTask; };
 
         var middleware = new SecurityStampMiddleware(
-            next, _stampValidator, NullLogger<SecurityStampMiddleware>.Instance);
+            next, NullLogger<SecurityStampMiddleware>.Instance);
 
         // Act
-        await middleware.InvokeAsync(context);
+        await middleware.InvokeAsync(context, _stampValidator);
 
         // Assert — request no autenticado pasa sin validación
         Assert.True(nextCalled);
@@ -62,10 +68,10 @@ public class SecurityStampMiddlewareTests
         RequestDelegate next = _ => { nextCalled = true; return Task.CompletedTask; };
 
         var middleware = new SecurityStampMiddleware(
-            next, _stampValidator, NullLogger<SecurityStampMiddleware>.Instance);
+            next, NullLogger<SecurityStampMiddleware>.Instance);
 
         // Act
-        await middleware.InvokeAsync(context);
+        await middleware.InvokeAsync(context, _stampValidator);
 
         // Assert — sin claim ssv, middleware rechaza con 401 (token malformado)
         Assert.False(nextCalled);
@@ -104,13 +110,56 @@ public class SecurityStampMiddlewareTests
         RequestDelegate next = _ => { nextCalled = true; return Task.CompletedTask; };
 
         var middleware = new SecurityStampMiddleware(
-            next, validator, NullLogger<SecurityStampMiddleware>.Instance);
+            next, NullLogger<SecurityStampMiddleware>.Instance);
 
         // Act
-        await middleware.InvokeAsync(context);
+        await middleware.InvokeAsync(context, validator);
 
         // Assert — stamp inválido, retorna 401
         Assert.False(nextCalled);
         Assert.Equal(StatusCodes.Status401Unauthorized, context.Response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Pipeline_WithScopedValidator_ResolvesFromRequestScope_DoesNotThrow()
+    {
+        // Arrange — replica el escenario real: SecurityStampValidator SCOPED + UseSecureAuthValidation.
+        // Antes del fix esto lanzaba "Cannot resolve scoped service ... from root provider" en el primer request.
+        var cache = Substitute.For<IDistributedCache>();
+        cache.GetAsync("secureauth:ssv:u1", Arg.Any<CancellationToken>())
+            .Returns(System.Text.Encoding.UTF8.GetBytes("stamp-123"));
+
+        var userStore = Substitute.For<IUserStore>();
+        var options = Microsoft.Extensions.Options.Options.Create(
+            new Abstractions.Options.SecureAuthOptions { SecurityStampCacheDuration = TimeSpan.FromMinutes(5) });
+
+        var builder = WebApplication.CreateBuilder();
+        builder.WebHost.UseTestServer();
+        builder.Services.AddScoped(_ => new Core.Services.SecurityStampValidator(
+            userStore, cache, options, NullLogger<Core.Services.SecurityStampValidator>.Instance));
+
+        var app = builder.Build();
+
+        // Simula UseAuthentication: el JWT ya decodificado puebla context.User
+        app.Use(async (context, next) =>
+        {
+            var identity = new ClaimsIdentity([
+                new Claim("sub", "u1"),
+                new Claim("ssv", "stamp-123")
+            ], "Bearer");
+            context.User = new ClaimsPrincipal(identity);
+            await next(context);
+        });
+        app.UseSecureAuthValidation();
+        app.MapGet("/secure", (HttpContext ctx) => Results.Ok(new { ok = true }));
+
+        await app.StartAsync();
+        var client = app.GetTestClient();
+
+        // Act — el primer request activa el pipeline; si el scoped se resolviera del root, lanzaría
+        var response = await client.GetAsync("/secure");
+
+        // Assert — el validador se resolvió del scope del request y el stamp coincide → 200
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
     }
 }

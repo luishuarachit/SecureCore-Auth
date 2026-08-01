@@ -49,8 +49,10 @@ public class PasskeyServiceTests
         // Arrange
         var user = new UserIdentity
         {
-            Id = "u1", Email = "test@example.com",
-            SecurityStamp = "s", PasswordHash = "h"
+            Id = "u1",
+            Email = "test@example.com",
+            SecurityStamp = "s",
+            PasswordHash = "h"
         };
 
         _credentialStore.FindByUserIdAsync("u1")
@@ -79,8 +81,10 @@ public class PasskeyServiceTests
         // Arrange
         var user = new UserIdentity
         {
-            Id = "u1", Email = "test@example.com",
-            SecurityStamp = "s", PasswordHash = "h"
+            Id = "u1",
+            Email = "test@example.com",
+            SecurityStamp = "s",
+            PasswordHash = "h"
         };
 
         var existingCreds = new List<StoredCredential>

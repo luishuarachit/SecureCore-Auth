@@ -244,6 +244,8 @@ services.AddSecureAuth(options => { ... })
 2. `app.UseSecureAuthValidation()`: Middleware de validación activa del SecurityStamp (contra caché/almacenamiento) y revocación de sesión.
 3. `app.UseAuthorization()`: Evaluación de políticas de acceso.
 
+> **DIDÁCTICA — Resolución scoped**: `SecurityStampValidator` es **scoped** y el middleware lo resuelve **por request** (vía `InvokeAsync`), no en su constructor. Los middleware se construyen una sola vez para toda la aplicación; inyectar un servicio scoped en el constructor crearía una **captive dependency** (una instancia scoped retenida por el root provider) y fallaría con `ValidateOnBuild`/`ValidateScopes`. Resolverlo por request garantiza que el validador siempre opere con un scope de request válido.
+
 ### 5.3. Endpoints Automáticos
 `app.MapSecureAuthEndpoints("/base-path")` registra:
 - `POST /login`: Recepción de credenciales.
@@ -341,13 +343,16 @@ Cualquier intento de sobrescribir estos claims via `UserIdentity.Claims` es igno
 
 ### 7.6. OAuth SignIn Options (v3.1.0)
 
-`OAuthSignInOptions` incluye nuevas propiedades para soportar autenticación basada en cookies HttpOnly:
+`OAuthSignInOptions` incluye nuevas propiedades para autenticación basada en cookies HttpOnly y para configurar el `redirect_uri` de OAuth:
 
 | Propiedad | Tipo | Default | Descripción |
 | :--- | :--- | :--- | :--- |
 | `SetCookiesDirectly` | `bool` | false | Si es true, setea cookies HttpOnly y redirige al SPA en lugar de retornar JSON. |
 | `CookieDomain` | `string?` | null | Dominio de las cookies (ej. ".example.com" para subdominios). |
 | `PostLoginRedirectUrl` | `string?` | null | URL de redirección post-login para el SPA. Default: "/". |
+| `PublicBaseUrl` | `string?` | null | Base pública de la API usada como `redirect_uri` del proveedor. Si es null, se deriva del request (scheme + host). Configúrala explícitamente si la API está detrás de un load balancer / TLS termination. |
+| `CallbackPrefix` | `string` | `/auth/oauth` | Prefijo de ruta donde se mapean los endpoints OAuth. El `redirect_uri` del proveedor se construye como `{base}{CallbackPrefix}/{provider}/callback`. |
+| `AllowedPostLoginHosts` | `string[]` | `[]` | Hosts extra permitidos como destino post-login del SPA. El query param `redirectUri` de `/authorize` solo se acepta si es https y su host está en esta lista o coincide con `PostLoginRedirectUrl`. Previene open redirect. |
 
 ```csharp
 // Activar cookies HttpOnly para OAuth
@@ -378,6 +383,11 @@ public interface IMfaCodeStore
 - La validación usa `CryptographicOperations.FixedTimeEquals` para prevenir timing attacks.
 - Los códigos son single-use: se eliminan tras el primer intento de validación.
 
+> **REQUISITO para MFA por email**: El `EmailMfaService` (implementación por defecto de `IEmailMfaService`) envía los códigos mediante `IEmailService`. SecureCore registra un `NullEmailService` por defecto (vía `TryAddScoped`) que **lanza** `InvalidOperationException` al usarse. Debes registrar tu propia implementación de `IEmailService` **antes** de `AddMfa()`/`AddPasswordAuthentication()`:
+> ```csharp
+> services.AddScoped<IEmailService, MyEmailService>();
+> ```
+
 ### 7.8. OAuthClaimHelper — Extracción Segura de Claims OIDC
 
 Helper estático en `SecureCore.Auth.OAuth` que extrae claims de `JwtSecurityToken` preservando los tipos cortos originales del JWT (evitando el mapeo a URIs que hace `ClaimsPrincipal`):
@@ -388,9 +398,15 @@ var sub = OAuthClaimHelper.GetClaim(jwt, "sub");
 var email = OAuthClaimHelper.GetClaim(jwt, "email");
 ```
 
-### 7.9. Normalización de URLs OAuth (v3.1.0)
+### 7.9. redirect_uri de OAuth y Normalización de URLs
 
-El endpoint `/authorize` ahora normaliza automáticamente la `redirectUri` eliminando el prefijo `www.` del host para coincidir con los redirect URIs registrados en los OAuth providers.
+El `redirect_uri` del proveedor OAuth es **siempre la URL del callback de la API** (`{base}{CallbackPrefix}/{provider}/callback`), nunca la URL del SPA. Los proveedores (Google, Microsoft, etc.) exigen que coincida exactamente con el registrado en su consola, tanto en el request `/authorize` como en el intercambio de tokens de `/callback`.
+
+La URL del callback se calcula una sola vez en `/authorize` (usando `PublicBaseUrl` o derivándola del request) y se guarda en el state de OAuth para que `/callback` reutilice exactamente el mismo valor (sin drift).
+
+El endpoint `/authorize` normaliza la `redirectUri` eliminando el prefijo `www.` del host para coincidir con los redirect URIs registrados. El query param `redirectUri` es el **destino post-login del SPA** (no el `redirect_uri` del proveedor); solo se acepta si es https y su host está en `AllowedPostLoginHosts` o coincide con `PostLoginRedirectUrl`; de lo contrario el request falla con `400 invalid_redirect_uri`.
+
+> **Requisito de deploy**: registra la URL exacta del callback de la API en cada consola de proveedor (ej. `https://api.example.com/auth/oauth/google/callback`).
 
 ### 7.10. CI/CD (v2.4.0)
 

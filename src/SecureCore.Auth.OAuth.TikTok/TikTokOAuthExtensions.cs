@@ -19,7 +19,7 @@ public static class TikTokOAuthExtensions
 
         builder.Services.AddSingleton(options);
         builder.Services.AddHttpClient<IOAuthProviderValidator, TikTokOAuthValidator>();
-        
+
         return builder;
     }
 }

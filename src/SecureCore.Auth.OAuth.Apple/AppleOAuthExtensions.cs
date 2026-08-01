@@ -19,30 +19,30 @@ public static class AppleOAuthExtensions
     /// <exception cref="ArgumentException">Se lanza si falta alguna configuración requerida.</exception>
     public static OAuthBuilder AddApple(this OAuthBuilder builder, Action<AppleOAuthOptions> configure)
     {
-        var options = new AppleOAuthOptions 
-        { 
-            ClientId = "", 
-            TeamId = "", 
-            KeyId = "", 
-            PrivateKey = "" 
+        var options = new AppleOAuthOptions
+        {
+            ClientId = "",
+            TeamId = "",
+            KeyId = "",
+            PrivateKey = ""
         };
         configure(options);
 
         // DIDÁCTICA: Apple es el proveedor más estricto. Requiere 4 piezas de información
         // a diferencia de otros que solo requieren ClientId y ClientSecret.
-        if (string.IsNullOrEmpty(options.ClientId) || 
-            string.IsNullOrEmpty(options.TeamId) || 
-            string.IsNullOrEmpty(options.KeyId) || 
+        if (string.IsNullOrEmpty(options.ClientId) ||
+            string.IsNullOrEmpty(options.TeamId) ||
+            string.IsNullOrEmpty(options.KeyId) ||
             string.IsNullOrEmpty(options.PrivateKey))
         {
             throw new ArgumentException("ClientId, TeamId, KeyId and PrivateKey are required for Apple OAuth.");
         }
 
         builder.Services.AddSingleton(options);
-        
+
         // Registramos el validador como una instancia de HttpClient para manejo eficiente de sockets
         builder.Services.AddHttpClient<IOAuthProviderValidator, AppleOAuthValidator>();
-        
+
         return builder;
     }
 }

@@ -91,7 +91,7 @@ SecureCore Auth **doesn't know how you store your data**. It doesn't matter if y
 
 ### Prerequisites
 
-- **.NET 8 SDK** or later installed ([download here](https://dotnet.microsoft.com/download))
+- **.NET 10 SDK** or later installed ([download here](https://dotnet.microsoft.com/download))
 - A code editor (VS Code, Visual Studio, Rider, etc.)
 - An existing ASP.NET Core application or a new one
 
@@ -719,6 +719,12 @@ app.MapSecureOAuthEndpoints();
 // GET /auth/oauth/{provider}/callback   -> Receives code and issues SecureCore JWT
 ```
 
+> [!IMPORTANT]
+> The OAuth `redirect_uri` is the **API callback URL** (`/auth/oauth/{provider}/callback`), never the SPA URL. Register that exact URL in each provider console (Google, Microsoft, etc.); providers reject any mismatch with `400 invalid_request`. When the API is behind a load balancer / TLS termination, set `OAuthSignInOptions.PublicBaseUrl` (e.g. `https://api.textea.me`) so the callback URL is built from config instead of the request.
+
+> [!NOTE]
+> The `redirectUri` query param of `/authorize` is the SPA **post-login target**. It is accepted only if HTTPS and its host is in `AllowedPostLoginHosts` or matches `PostLoginRedirectUrl`; otherwise the request fails with `400 invalid_redirect_uri` (prevents open redirect).
+
 > [!TIP]
 > **Security v2.3+**: All OIDC providers now validate the `nonce` cryptographically and cache public keys (JWKS) with **auto-retry** on key rotation. If a provider rotates its signing keys (e.g. Google's 24h rotation), the library automatically fetches fresh keys and retries validation before declaring the token invalid — ensuring zero downtime. Facebook uses `appsecret_proof` (HMAC-SHA256) for server-to-server calls.
 
@@ -735,6 +741,7 @@ builder.Services.AddSecureAuth(options => { ... })
             opts.SetCookiesDirectly = true;
             opts.CookieDomain = ".example.com";    // Share across subdomains
             opts.PostLoginRedirectUrl = "https://app.example.com/dashboard";
+            opts.AllowedPostLoginHosts = ["app.example.com"]; // SPA hosts allowed for post-login redirect
         });
     });
 ```
@@ -821,6 +828,33 @@ POST /auth/mfa/verify-code
 
 **⚠️ Additional Security Requirements**:
 The implementer MUST integrate a CAPTCHA solution (Cloudflare Turnstile, hCAPTCHA, reCAPTCHA) to protect MFA enrollment and password reset endpoints against automation. The library does not include CAPTCHA by default.
+
+#### Email MFA — How to send the code
+
+When `AllowedMethods` includes `"email"`, codes are sent through the `IEmailService` interface (agnostic: you choose SMTP, SendGrid, Amazon SES, etc.).
+
+> **IMPORTANT**: SecureCore registers a `NullEmailService` by default (via `TryAddScoped`). It **throws** `InvalidOperationException` when used. You MUST register your own `IEmailService` **before** calling `AddMfa()` / `AddPasswordAuthentication()`, otherwise email codes will never be delivered.
+
+```csharp
+using SecureCore.Auth.Abstractions.Interfaces;
+
+public class MyEmailService : IEmailService
+{
+    public Task SendAsync(
+        string to, string subject, string? htmlBody = null,
+        string? textBody = null, CancellationToken ct = default)
+    {
+        // Real email sending logic goes here (SMTP, SendGrid, SES, MailKit...)
+        Console.WriteLine($"[EMAIL] To {to}: {subject}");
+        return Task.CompletedTask;
+    }
+}
+```
+
+```csharp
+// In Program.cs, BEFORE AddMfa()/AddPasswordAuthentication():
+builder.Services.AddScoped<IEmailService, MyEmailService>();
+```
 
 ---
 

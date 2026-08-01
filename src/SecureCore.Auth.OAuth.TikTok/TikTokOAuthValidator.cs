@@ -78,7 +78,7 @@ public class TikTokOAuthValidator : IOAuthProviderValidator
         // Obtener perfil
         using var userRequest = new HttpRequestMessage(HttpMethod.Get, "https://open.tiktokapis.com/v2/user/info/?fields=open_id,union_id,avatar_url,display_name");
         userRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", tokenResponse.AccessToken);
-        
+
         var userResponse = await _httpClient.SendAsync(userRequest, cancellationToken);
         var profileContainer = await userResponse.Content.ReadFromJsonAsync<TikTokUserProfileContainer>(cancellationToken: cancellationToken);
 
@@ -88,7 +88,7 @@ public class TikTokOAuthValidator : IOAuthProviderValidator
         }
 
         var profile = profileContainer?.Data?.User;
-        
+
         if (profile == null) return OAuthIdentityResult.Failure("profile_failed", "Failed to parse TikTok profile.");
 
         return new OAuthIdentityResult
@@ -122,8 +122,8 @@ public class TikTokOAuthValidator : IOAuthProviderValidator
 
         var tokenResponse = await response.Content.ReadFromJsonAsync<TikTokTokenResponse>(cancellationToken: cancellationToken);
         return new ExternalTokenRefreshResult(
-            true, 
-            tokenResponse?.AccessToken, 
+            true,
+            tokenResponse?.AccessToken,
             tokenResponse != null ? DateTimeOffset.UtcNow.AddSeconds(tokenResponse.ExpiresIn) : null,
             null);
     }

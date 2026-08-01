@@ -24,13 +24,18 @@ namespace SecureCore.Auth.AspNetCore;
 /// </remarks>
 public sealed class SecurityStampMiddleware(
     RequestDelegate next,
-    SecurityStampValidator stampValidator,
     ILogger<SecurityStampMiddleware> logger)
 {
     /// <summary>
     /// Procesa la petición HTTP, validando el Security Stamp si el usuario está autenticado.
     /// </summary>
-    public async Task InvokeAsync(HttpContext context)
+    /// <remarks>
+    /// DIDÁCTICA: SecurityStampValidator es un servicio SCOPED, por lo que NO debe inyectarse
+    /// en el constructor del middleware (que se instancia desde el root provider). ASP.NET Core
+    /// inyecta los parámetros de InvokeAsync desde HttpContext.RequestServices (el scope del
+    /// request), que es donde debe resolverse un servicio scoped.
+    /// </remarks>
+    public async Task InvokeAsync(HttpContext context, SecurityStampValidator stampValidator)
     {
         // Solo validamos si el usuario está autenticado
         if (context.User.Identity?.IsAuthenticated == true)

@@ -29,9 +29,9 @@ public class ExternalTokenAccessor(
         if (string.IsNullOrEmpty(entry.RefreshToken))
             return null;
 
-        var validator = validators.FirstOrDefault(v => 
+        var validator = validators.FirstOrDefault(v =>
             v.ProviderName.Equals(provider, StringComparison.OrdinalIgnoreCase));
-            
+
         if (validator is null)
             return null;
 

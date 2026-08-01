@@ -63,16 +63,19 @@ public static class OAuthEndpoints
         // ─────────────────────────────────────────────────────────
         group.MapGet("/{provider}/authorize", async (
             string provider,
-            string redirectUri,
+            string? redirectUri,
             HttpContext context,
             IServiceProvider serviceProvider,
             IOAuthStateStore stateStore,
             IOptions<OAuthSignInOptions> options,
             CancellationToken ct) =>
         {
-            // DIDÁCTICA: Normalizamos la URL eliminando "www." para coincidir
-            // con los redirect URIs registrados en los OAuth providers.
-            var normalizedRedirectUri = NormalizeUrl(redirectUri);
+            // DIDÁCTICA: El redirect_uri del proveedor SIEMPRE es el callback de la API,
+            // nunca la URL del SPA. Los providers (Google, Microsoft, etc.) exigen que
+            // coincida exactamente con el registrado en su consola. La URL del SPA
+            // (redirectUri) solo se usa como destino post-login y se valida para
+            // prevenir open redirect.
+            var callbackUrl = BuildCallbackUrl(prefix, provider, options.Value, context);
 
             var validators = serviceProvider.GetServices<IOAuthProviderValidator>();
             var validator = validators.FirstOrDefault(v => v.ProviderName.Equals(provider, StringComparison.OrdinalIgnoreCase));
@@ -80,13 +83,31 @@ public static class OAuthEndpoints
             if (validator is null)
                 return Results.NotFound(new { error = "provider_not_found" });
 
+            string? postLoginTarget;
+            if (!string.IsNullOrWhiteSpace(redirectUri))
+            {
+                if (!IsSafePostLoginTarget(redirectUri, options.Value))
+                {
+                    return Results.Json(
+                        new { error = "invalid_redirect_uri", message = "redirectUri debe ser https y su host debe estar en la lista de hosts permitidos." },
+                        statusCode: StatusCodes.Status400BadRequest);
+                }
+
+                // Normalizamos la URL eliminando "www." para coincidir con el host permitido.
+                postLoginTarget = NormalizeUrl(redirectUri);
+            }
+            else
+            {
+                postLoginTarget = options.Value.PostLoginRedirectUrl;
+            }
+
             var state = GenerateSecureRandomString(32);
             var nonce = GenerateSecureRandomString(32);
 
-            var entry = new OAuthStateEntry(nonce, provider, normalizedRedirectUri, DateTimeOffset.UtcNow);
+            var entry = new OAuthStateEntry(nonce, provider, postLoginTarget ?? "/", DateTimeOffset.UtcNow, callbackUrl);
             await stateStore.SaveAsync(state, entry, TimeSpan.FromMinutes(10), ct);
 
-            var authUrl = validator.BuildAuthorizationUrl(normalizedRedirectUri, [], state, nonce);
+            var authUrl = validator.BuildAuthorizationUrl(callbackUrl, [], state, nonce);
             return Results.Redirect(authUrl.Url);
         })
         .WithName("OAuthAuthorize")
@@ -112,11 +133,16 @@ public static class OAuthEndpoints
                 return Results.Json(new { error = "invalid_state", message = "El state es inválido o expiró." }, statusCode: StatusCodes.Status400BadRequest);
             }
 
-            var valRequest = new OAuthValidationRequest 
-            { 
+            // Usamos el CallbackUri almacenado en el authorize (mismo valor enviado al
+            // provider). Fallback defensivo por si el store no lo persistió (entradas viejas
+            // o implementaciones custom de IOAuthStateStore).
+            var callbackUrl = stateEntry.CallbackUri ?? BuildCallbackUrl(prefix, provider, options.Value, context);
+
+            var valRequest = new OAuthValidationRequest
+            {
                 Code = code,
                 State = state,
-                RedirectUri = stateEntry.RedirectUri,
+                RedirectUri = callbackUrl,
                 Nonce = stateEntry.Nonce
             };
 
@@ -145,7 +171,7 @@ public static class OAuthEndpoints
             IExternalTokenStore tokenStore,
             CancellationToken ct) =>
         {
-            var userId = context.User.FindFirst("sub")?.Value 
+            var userId = context.User.FindFirst("sub")?.Value
                       ?? context.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
 
             if (userId is null) return Results.Unauthorized();
@@ -183,6 +209,59 @@ public static class OAuthEndpoints
         }
 
         return url;
+    }
+
+    /// <summary>
+    /// Construye la URL del callback de la API que se envía como redirect_uri al
+    /// proveedor OAuth. Usa PublicBaseUrl si está configurado; si no, la deriva del
+    /// request actual (scheme + host). Aplica NormalizeUrl para eliminar "www.".
+    /// </summary>
+    internal static string BuildCallbackUrl(string prefix, string provider, OAuthSignInOptions options, HttpContext context)
+    {
+        var baseUrl = options.PublicBaseUrl;
+        if (string.IsNullOrWhiteSpace(baseUrl))
+        {
+            baseUrl = $"{context.Request.Scheme}://{context.Request.Host}";
+        }
+
+        var callbackUrl = $"{baseUrl.TrimEnd('/')}/{prefix.Trim('/')}/{provider}/callback";
+        return NormalizeUrl(callbackUrl);
+    }
+
+    /// <summary>
+    /// Valida que una URL pueda usarse como destino del redirect post-login (SPA).
+    /// Debe ser absoluta, https y su host debe estar en AllowedPostLoginHosts o
+    /// coincidir con el host de PostLoginRedirectUrl. Previene open redirect.
+    /// </summary>
+    internal static bool IsSafePostLoginTarget(string? url, OAuthSignInOptions options)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+            return false;
+
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            return false;
+
+        if (!string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        var host = uri.Host;
+        if (string.IsNullOrEmpty(host))
+            return false;
+
+        foreach (var allowed in options.AllowedPostLoginHosts)
+        {
+            if (string.Equals(host, allowed, StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+
+        if (!string.IsNullOrEmpty(options.PostLoginRedirectUrl)
+            && Uri.TryCreate(options.PostLoginRedirectUrl, UriKind.Absolute, out var configured)
+            && string.Equals(host, configured.Host, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return false;
     }
 
     /// <summary>
@@ -230,7 +309,12 @@ public static class OAuthEndpoints
 
             context.Response.Cookies.Append(RefreshTokenCookie, result.Tokens.RefreshToken, refreshCookieOptions);
 
-            var postLoginUrl = signInOptions.PostLoginRedirectUrl ?? "/";
+            // SEGURIDAD: Solo redirigimos al redirectUri del request si pasó la validación
+            // (https + host permitido). En cualquier otro caso (incluido Flujo B, donde no
+            // hay redirectUri), usamos el PostLoginRedirectUrl configurado.
+            var postLoginUrl = IsSafePostLoginTarget(redirectUri, signInOptions)
+                ? redirectUri!
+                : signInOptions.PostLoginRedirectUrl ?? "/";
 
             // Agregamos isNewUser como query param para que el SPA pueda mostrar onboarding
             if (result.IsNewUser)

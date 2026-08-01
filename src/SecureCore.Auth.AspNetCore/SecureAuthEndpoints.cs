@@ -169,7 +169,7 @@ public static class SecureAuthEndpoints
                 // Log del intento malicioso
                 System.Diagnostics.Debug.WriteLine(
                     $"INTENTO DE ESCALACIÓN: Usuario {userId} intentó revocar sesión del usuario {entry.UserId}");
-                
+
                 return Results.Forbid();  // 403 Forbidden
             }
 
@@ -225,7 +225,7 @@ public static class SecureAuthEndpoints
             }
 
             await orchestrator.RequestPasswordResetAsync(request.Email, ct);
-            
+
             // Siempre respondemos 200 OK independientemente de qué ocurrió en Orchestrator.
             return Results.Ok(new { message = "Si tu dirección existe en nuestro sistema, recibirás un correo con instrucciones." });
         })

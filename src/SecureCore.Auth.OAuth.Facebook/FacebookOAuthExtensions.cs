@@ -19,7 +19,7 @@ public static class FacebookOAuthExtensions
 
         builder.Services.AddSingleton(options);
         builder.Services.AddHttpClient<IOAuthProviderValidator, FacebookOAuthValidator>();
-        
+
         return builder;
     }
 }

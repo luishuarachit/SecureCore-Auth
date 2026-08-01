@@ -150,7 +150,7 @@ public class AppleOAuthValidator : IOAuthProviderValidator
     public OAuthAuthorizationUrl BuildAuthorizationUrl(string redirectUri, string[] scopes, string state, string nonce)
     {
         var allScopes = string.Join(" ", scopes.Length > 0 ? scopes : _options.DefaultScopes);
-        
+
         // Apple requiere response_mode=form_post si pides scopes de usuario, pero
         // si usamos solo el standard flow para web, 'code' es suficiente.
         var url = $"https://appleid.apple.com/auth/authorize" +
@@ -161,7 +161,7 @@ public class AppleOAuthValidator : IOAuthProviderValidator
                   $"&response_mode=form_post" + // Apple suele requerir form_post para enviar el code
                   $"&state={state}" +
                   $"&nonce={nonce}";
-                  
+
         return new OAuthAuthorizationUrl(url);
     }
 
@@ -186,12 +186,12 @@ public class AppleOAuthValidator : IOAuthProviderValidator
         }
 
         var tokenResponse = await response.Content.ReadFromJsonAsync<AppleTokenResponse>(cancellationToken: cancellationToken);
-        
+
         if (string.IsNullOrEmpty(tokenResponse?.IdToken))
             return OAuthIdentityResult.Failure("missing_id_token", "No id_token returned from Apple.");
 
         var identityResult = await ValidateIdTokenAsync(tokenResponse.IdToken, expectedNonce, cancellationToken);
-        
+
         if (identityResult.Succeeded)
         {
             return identityResult with
@@ -201,7 +201,7 @@ public class AppleOAuthValidator : IOAuthProviderValidator
                 TokenExpiresAt = DateTimeOffset.UtcNow.AddSeconds(tokenResponse.ExpiresIn)
             };
         }
-            
+
         return identityResult;
     }
 
@@ -225,10 +225,10 @@ public class AppleOAuthValidator : IOAuthProviderValidator
         }
 
         var tokenResponse = await response.Content.ReadFromJsonAsync<AppleTokenResponse>(cancellationToken: cancellationToken);
-        
+
         return new ExternalTokenRefreshResult(
-            true, 
-            tokenResponse?.AccessToken, 
+            true,
+            tokenResponse?.AccessToken,
             tokenResponse != null ? DateTimeOffset.UtcNow.AddSeconds(tokenResponse.ExpiresIn) : null,
             null);
     }

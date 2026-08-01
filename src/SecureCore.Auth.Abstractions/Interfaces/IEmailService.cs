@@ -8,6 +8,12 @@ namespace SecureCore.Auth.Abstractions.Interfaces;
 /// el envío de emails para password reset, códigos MFA, y otras notificaciones.
 ///
 /// El implementador puede usar SendGrid, MailKit, AWS SES, etc.
+///
+/// REQUISITO DE REGISTRO: SecureCore NO registra una implementación real.
+/// Si no registras la tuya, se usa NullEmailService por defecto (registrado con
+/// TryAddScoped), que NO envía y lanza InvalidOperationException al intentar
+/// usarlo. Registra tu implementación ANTES de AddMfa()/AddPasswordAuthentication():
+///   services.AddScoped<IEmailService, MyEmailService>();
 /// </remarks>
 public interface IEmailService
 {

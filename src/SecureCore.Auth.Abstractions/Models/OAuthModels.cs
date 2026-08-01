@@ -68,7 +68,7 @@ public record OAuthValidationRequest
     /// Flujo A: State original (para validar)
     /// </summary>
     public string? State { get; init; }
-    
+
     /// <summary>
     /// Flujo A: La URI de redirección que se usó.
     /// </summary>
@@ -98,6 +98,31 @@ public class OAuthSignInOptions
     public bool AllowImplicitRegistration { get; set; }
     public bool PersistProviderTokens { get; set; }
     public Type? UserFactoryType { get; set; }
+
+    /// <summary>
+    /// Base pública de la API usada como redirect_uri ante los proveedores OAuth.
+    /// Ej: "https://api.textea.me". Si es null, la URL de callback se deriva del
+    /// request actual (scheme + host). Configúralo explícitamente cuando la API
+    /// esté detrás de un load balancer / TLS termination, donde Request.Scheme/Host
+    /// no son fiables.
+    /// </summary>
+    public string? PublicBaseUrl { get; set; }
+
+    /// <summary>
+    /// Prefijo de ruta donde se mapean los endpoints OAuth.
+    /// El redirect_uri del proveedor se construye como
+    /// "{base}{CallbackPrefix}/{provider}/callback".
+    /// Por defecto: "/auth/oauth" (debe coincidir con el prefijo de MapSecureOAuthEndpoints).
+    /// </summary>
+    public string CallbackPrefix { get; set; } = "/auth/oauth";
+
+    /// <summary>
+    /// Hosts adicionales permitidos como destino del redirect post-login del SPA.
+    /// El valor pasado en el query param "redirectUri" de /authorize solo se acepta
+    /// si es https y su host está en esta lista o coincide con el host de
+    /// PostLoginRedirectUrl. Previene open redirect.
+    /// </summary>
+    public string[] AllowedPostLoginHosts { get; set; } = [];
 
     /// <summary>
     /// Si es true, el callback OAuth setea cookies HttpOnly con los tokens

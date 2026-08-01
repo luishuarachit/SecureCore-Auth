@@ -133,8 +133,8 @@ public class GitHubOAuthValidator : IOAuthProviderValidator
             AccessToken = tokenResponse.AccessToken,
             RefreshToken = tokenResponse.RefreshToken,
             Scopes = tokenResponse.Scope?.Split(' '),
-            TokenExpiresAt = tokenResponse.ExpiresIn > 0 
-                ? DateTimeOffset.UtcNow.AddSeconds(tokenResponse.ExpiresIn) 
+            TokenExpiresAt = tokenResponse.ExpiresIn > 0
+                ? DateTimeOffset.UtcNow.AddSeconds(tokenResponse.ExpiresIn)
                 : DateTimeOffset.UtcNow.AddHours(8) // Fallback típico
         };
     }
@@ -165,8 +165,8 @@ public class GitHubOAuthValidator : IOAuthProviderValidator
         }
 
         return new ExternalTokenRefreshResult(
-            true, 
-            tokenResponse.AccessToken, 
+            true,
+            tokenResponse.AccessToken,
             tokenResponse.ExpiresIn > 0 ? DateTimeOffset.UtcNow.AddSeconds(tokenResponse.ExpiresIn) : null,
             null);
     }

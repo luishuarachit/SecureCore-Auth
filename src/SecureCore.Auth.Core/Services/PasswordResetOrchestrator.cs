@@ -43,7 +43,7 @@ public sealed class PasswordResetOrchestrator(
 
         // 1. Buscar usuario. (Simularemos la misma latencia si no existe).
         var user = await userStore.FindByEmailAsync(email, cancellationToken);
-        
+
         if (user is null)
         {
             // Operación de tiempo constante (dummy string de 32 bytes en b64url)
@@ -137,7 +137,7 @@ public sealed class PasswordResetOrchestrator(
 
         // 7. Señalizar el éxito por el dispatcher general
         logger.LogInformation("Cambio verificado exitosamente vía Token de Recarga para el Usuario {UserId}", user.Id);
-        await eventDispatcher.DispatchAsync(new AuthEvent 
+        await eventDispatcher.DispatchAsync(new AuthEvent
         {
             EventType = AuthEventType.PasswordResetCompleted,
             UserId = user.Id

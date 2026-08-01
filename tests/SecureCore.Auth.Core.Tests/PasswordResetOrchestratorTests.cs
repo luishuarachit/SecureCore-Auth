@@ -17,15 +17,15 @@ public class PasswordResetOrchestratorTests
     private readonly Mock<IPasswordHasher> _passwordHasherMock = new();
     private readonly Mock<ISessionStore> _sessionStoreMock = new();
     private readonly Mock<IAuthEventDispatcher> _eventDispatcherMock = new();
-    
+
     // Para simplificar, obviaremos las inyecciones anidadas completas del SessionOrchestrator en favor de una configuración mockeada indirectamente si el diseño lo permitiera - sin embargo, ya que se le requiere inyectar su instancia cruda, inicializaremos la cadena de dependencias requerida.
     private readonly Mock<ITokenService> _tokenServiceMock = new();
     private readonly Mock<IOperationLock> _operationLockMock = new();
     private readonly Mock<Microsoft.Extensions.Caching.Distributed.IDistributedCache> _cacheMock = new();
-    
+
     private readonly IOptions<PasswordResetOptions> _options;
     private readonly IOptions<SecureAuthOptions> _secureAuthOptions;
-    
+
     private readonly PasswordResetOrchestrator _sut;
     private readonly SessionOrchestrator _sessionOrchestrator;
 
@@ -98,7 +98,7 @@ public class PasswordResetOrchestratorTests
         var user = new UserIdentity { Id = "user-1", Email = "found@example.com", SecurityStamp = "stamp" };
         _userStoreMock.Setup(m => m.FindByEmailAsync("found@example.com", default))
             .ReturnsAsync(user);
-        
+
         _passwordResetStoreMock.Setup(m => m.CountRecentRequestsAsync(user.Id, It.IsAny<DateTime>(), default))
             .ReturnsAsync(0);
 
@@ -133,12 +133,12 @@ public class PasswordResetOrchestratorTests
 
         // Simulamos que el token exista en DB y no sea inválido
         _passwordResetStoreMock.Setup(m => m.FindByTokenHashAsync(It.IsAny<string>(), default))
-            .ReturnsAsync(new PasswordResetEntry 
-            { 
-                TokenHash = "hash-123", 
-                UserId = user.Id, 
+            .ReturnsAsync(new PasswordResetEntry
+            {
+                TokenHash = "hash-123",
+                UserId = user.Id,
                 ExpiresAtUtc = DateTime.UtcNow.AddMinutes(10),
-                IsUsed = false 
+                IsUsed = false
             });
 
         _passwordHasherMock.Setup(m => m.HashPassword("newPass!")).Returns("newPassHashed");
@@ -148,7 +148,7 @@ public class PasswordResetOrchestratorTests
 
         // Assert
         Assert.Equal(PasswordResetResult.Success, result);
-        
+
         // Verifica que la nueva clave ha sido insertada en la base de datos de usuarios
         _userStoreMock.Verify(m => m.UpdatePasswordHashAsync("user-1", "newPassHashed", default), Times.Once);
 
@@ -159,7 +159,7 @@ public class PasswordResetOrchestratorTests
         // Marcar consumible como utilizado
         _passwordResetStoreMock.Verify(m => m.MarkAsUsedAsync(It.IsAny<string>(), default), Times.Once);
     }
-    
+
     [Fact]
     public async Task ConfirmReset_ExpiredToken_ReturnsInvalidToken()
     {
@@ -167,12 +167,12 @@ public class PasswordResetOrchestratorTests
         var rawTokenTest = "dummyTokenTest==";
 
         _passwordResetStoreMock.Setup(m => m.FindByTokenHashAsync(It.IsAny<string>(), default))
-            .ReturnsAsync(new PasswordResetEntry 
-            { 
-                TokenHash = "hash-123", 
-                UserId = "user-1", 
+            .ReturnsAsync(new PasswordResetEntry
+            {
+                TokenHash = "hash-123",
+                UserId = "user-1",
                 ExpiresAtUtc = DateTime.UtcNow.AddMinutes(-5), // Expired!
-                IsUsed = false 
+                IsUsed = false
             });
 
         // Act

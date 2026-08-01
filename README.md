@@ -1,7 +1,7 @@
 # SecureCore Auth Framework 🛡️
 
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](https://github.com/luishuarachit/SecureCore-Auth)
-[![.NET](https://img.shields.io/badge/.NET-8.0-unlocked.svg)](https://dotnet.microsoft.com/)
+[![Version](https://img.shields.io/badge/version-3.1.3-blue.svg)](https://github.com/luishuarachit/SecureCore-Auth)
+[![.NET](https://img.shields.io/badge/.NET-10.0-unlocked.svg)](https://dotnet.microsoft.com/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 **SecureCore Auth** es una solución de identidad y gestión de sesiones modular, agnóstica a la base de datos y diseñada para aplicaciones .NET modernas que requieren un equilibrio entre ligereza y robustez.
@@ -22,9 +22,11 @@
 El framework está dividido en componentes independientes para que solo instales lo que necesites:
 
 -   **SecureCore.Auth.Abstractions**: Contratos, interfaces y modelos base. Sin dependencias.
--   **SecureCore.Auth.Core**: El motor de orquestación, lógica de JWT y hashing (Argon2id).
+-   **SecureCore.Auth.Core**: El motor de orquestación, lógica de JWT, hashing (Argon2id) y MFA.
 -   **SecureCore.Auth.WebAuthn**: Soporte para llaves físicas y biometría (FIDO2).
 -   **SecureCore.Auth.AspNetCore**: Integración fluida con el pipeline de ASP.NET Core (Middleware y Endpoints).
+-   **SecureCore.Auth.OAuth**: Orquestación OAuth2/OIDC y persistencia de tokens de proveedor.
+-   **SecureCore.Auth.OAuth.{Apple, Facebook, GitHub, Google, LinkedIn, Microsoft, TikTok}**: Validadores específicos por proveedor (JWKS, nonce anti-replay, `appsecret_proof`).
 
 ---
 
@@ -67,6 +69,8 @@ app.MapSecureAuthEndpoints("/auth"); // Mapea login, refresh, logout automática
 -   **Refresh Token Rotation (RTR)**: Protege contra el robo de tokens en clientes (SPAs/Mobile).
 -   **Security Stamp Versioning (SSV)**: Permite invalidar todas las sesiones de un usuario de forma inmediata (Panic Button).
 -   **Constant-Time Verification**: Previene ataques de tiempo durante la validación de credenciales.
+-   **Multi-Factor Authentication (MFA)**: TOTP (RFC 6238) y códigos por email con cifrado AES-256-GCM de secretos.
+-   **OAuth2/OIDC**: Login social (Google, Microsoft, Apple, GitHub, Facebook, LinkedIn, TikTok) con validación criptográfica de JWKS.
 
 ---
 

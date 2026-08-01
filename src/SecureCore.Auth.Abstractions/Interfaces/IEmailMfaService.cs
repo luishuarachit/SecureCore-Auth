@@ -7,6 +7,11 @@ namespace SecureCore.Auth.Abstractions.Interfaces;
 /// DIDÁCTICA: Este servicio usa IEmailService (reemplazo de IResetTokenMailer)
 /// para enviar el código. El código se genera y guarda con hash SHA-256 en
 /// la sesión MFA temporal.
+///
+/// REQUISITO: La implementación por defecto (EmailMfaService) depende de
+/// IEmailService. Debes registrar tu propia implementación de IEmailService
+/// ANTES de AddMfa()/AddPasswordAuthentication(); de lo contrario se usará
+/// NullEmailService, que lanza InvalidOperationException al intentar enviar.
 /// </remarks>
 public interface IEmailMfaService
 {

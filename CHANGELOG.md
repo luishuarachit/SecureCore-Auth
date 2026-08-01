@@ -5,6 +5,44 @@ Todas los cambios notables en este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 y este proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.3] - 2026-08-01
+
+### Corregido
+- **OAuth `redirect_uri` apuntaba al SPA** — los providers rechazaban el flujo con `400 invalid_request`:
+  - `/authorize` usaba la URL del SPA como `redirect_uri` del proveedor. Ahora se construye el **callback de la API** (`{PublicBaseUrl | scheme+host}{CallbackPrefix}/{provider}/callback`) y se guarda en el state para que `/callback` reutilice exactamente el mismo valor en el exchange (sin drift).
+  - Nueva opción `OAuthSignInOptions.PublicBaseUrl` para cuando la API está detrás de un load balancer / TLS termination; `CallbackPrefix` configura la ruta del callback.
+
+- **Open redirect post-login OAuth**:
+  - El `redirectUri` del SPA en `/authorize` solo se acepta si es **https** y su host está en `AllowedPostLoginHosts` o coincide con `PostLoginRedirectUrl`; de lo contrario se responde `400` y se usa el fallback configurado. Previene ataques de open redirect.
+
+- **`SecurityStampValidator` scoped resuelto desde root provider**:
+  - `SecurityStampMiddleware` inyectaba el validador en el constructor (instancia única para toda la app). Con `ValidateScopes=true` el host fallaba al arrancar (`Cannot resolve scoped service ... from root provider`).
+  - Ahora se resuelve **por request** vía el parámetro de `InvokeAsync`, evitando la captive dependency y usando el scope del request.
+
+- **`EmailMfaService` rompía el arranque sin `IEmailService` registrado**:
+  - Con `ValidateOnBuild=true`, el descriptor de `EmailMfaService` fallaba al no existir una implementación de `IEmailService`.
+
+### Añadido
+- **`NullEmailService` como default de `IEmailService`**:
+  - `AddMfa()` y `AddPasswordAuthentication()` registran `TryAddScoped<IEmailService, NullEmailService>()`.
+  - Si el consumidor no registra su implementación, `NullEmailService` **lanza `InvalidOperationException`** al intentar enviar (nunca falla silenciosamente). Sobrescribible registrando la implementación real **antes** de `AddMfa()`.
+
+- **`OAuthSignInOptions.PublicBaseUrl`, `CallbackPrefix` y `AllowedPostLoginHosts`** para controlar el callback OAuth y los destinos post-login permitidos.
+
+- **Tests de integración con `Microsoft.AspNetCore.TestHost`**:
+  - `OAuthEndpointsTests`: verifica que el exchange usa el callback de la API (nunca la URL del SPA) y que el destino post-login se valida.
+  - `EmailServiceRegistrationTests`: cubre el build con `ValidateOnBuild=true`, el throw de `NullEmailService` y el override por `TryAdd`.
+
+### Modificado
+- **`.gitignore`**: se añaden `dist/` y `*.pem` para evitar commit accidental de claves de prueba (`jwt_private.pem`) y artefactos de build.
+- **Limpieza de whitespace**: `dotnet format whitespace` aplicado en toda la solución (trailing whitespace y line endings).
+- **Soporte .NET 8 eliminado**: se removieron carpetas residuales `bin/Debug/net8.0` y `obj/*/net8.0`. El repositorio solo apunta a **.NET 10**.
+
+### Documentación
+- Guías de uso (ES/EN): nueva sección "MFA por email — Cómo enviar el código" y requisito de registro de `IEmailService`.
+- Referencias técnicas (ES/EN): nota de resolución scoped del `SecurityStampValidator` en el pipeline y requisito de `IEmailService` para MFA por email.
+- Prerrequisitos actualizados a `.NET 10 SDK`.
+
 ## [3.1.0] - 2026-07-27
 
 ### Corregido

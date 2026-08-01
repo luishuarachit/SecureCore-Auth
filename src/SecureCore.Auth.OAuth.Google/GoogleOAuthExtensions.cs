@@ -19,9 +19,9 @@ public static class GoogleOAuthExtensions
         }
 
         builder.Services.AddSingleton(options);
-        
+
         builder.Services.AddHttpClient<IOAuthProviderValidator, GoogleOAuthValidator>();
-        
+
         return builder;
     }
 }

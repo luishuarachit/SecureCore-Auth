@@ -18,9 +18,9 @@ public static class GitHubOAuthExtensions
         }
 
         builder.Services.AddSingleton(options);
-        
+
         builder.Services.AddHttpClient<IOAuthProviderValidator, GitHubOAuthValidator>();
-        
+
         return builder;
     }
 }

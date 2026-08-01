@@ -185,7 +185,7 @@ public class LinkedInOAuthValidator : IOAuthProviderValidator
             return OAuthIdentityResult.Failure("missing_id_token", "No id_token returned from LinkedIn.");
 
         var identityResult = await ValidateIdTokenAsync(tokenResponse.IdToken, expectedNonce, cancellationToken);
-        
+
         if (identityResult.Succeeded)
         {
             return identityResult with
@@ -195,7 +195,7 @@ public class LinkedInOAuthValidator : IOAuthProviderValidator
                 TokenExpiresAt = DateTimeOffset.UtcNow.AddSeconds(tokenResponse.ExpiresIn)
             };
         }
-            
+
         return identityResult;
     }
 
@@ -217,10 +217,10 @@ public class LinkedInOAuthValidator : IOAuthProviderValidator
         }
 
         var tokenResponse = await response.Content.ReadFromJsonAsync<LinkedInTokenResponse>(cancellationToken: cancellationToken);
-        
+
         return new ExternalTokenRefreshResult(
-            true, 
-            tokenResponse?.AccessToken, 
+            true,
+            tokenResponse?.AccessToken,
             tokenResponse != null ? DateTimeOffset.UtcNow.AddSeconds(tokenResponse.ExpiresIn) : null,
             null);
     }

@@ -8,10 +8,11 @@ namespace SecureCore.Auth.OAuth.Abstractions;
 /// Representa una entrada de estado temporal almacenada durante el flujo OAuth.
 /// </summary>
 public record OAuthStateEntry(
-    string Nonce, 
-    string Provider, 
-    string RedirectUri, 
-    DateTimeOffset CreatedAt);
+    string Nonce,
+    string Provider,
+    string RedirectUri,
+    DateTimeOffset CreatedAt,
+    string? CallbackUri = null);
 
 /// <summary>
 /// Contrato para almacenar temporalmente el state y nonce durante el Flujo de Authorization Code.

@@ -18,12 +18,12 @@ public class MicrosoftOAuthOptions
 {
     public required string ClientId { get; set; }
     public required string ClientSecret { get; set; }
-    
+
     /// <summary>
     /// El tenant de Microsoft Entra ID. Por defecto es "common" (multitenant).
     /// </summary>
     public string Tenant { get; set; } = "common";
-    
+
     public string[] DefaultScopes { get; set; } = ["openid", "profile", "email", "offline_access"];
 }
 
@@ -36,7 +36,7 @@ public class MicrosoftOAuthValidator : IOAuthProviderValidator
     private readonly MicrosoftOAuthOptions _options;
     private readonly HttpClient _httpClient;
     private readonly JwtSecurityTokenHandler _tokenHandler = new();
-    
+
     // Caché JWKS con Lazy<Task> para evitar cuello de botella en alta concurrencia
     private static Lazy<Task<JsonWebKeySet>>? _jwksRefreshTask;
     private static DateTime _jwksLastRefreshed;
@@ -191,7 +191,7 @@ public class MicrosoftOAuthValidator : IOAuthProviderValidator
     public OAuthAuthorizationUrl BuildAuthorizationUrl(string redirectUri, string[] scopes, string state, string nonce)
     {
         var allScopes = string.Join(" ", scopes.Length > 0 ? scopes : _options.DefaultScopes);
-        
+
         // Incluimos response_mode=query para asegurar el retorno vía GET al callback.
         // Microsoft v2.0 exige nonce para id_tokens.
         var url = $"{GetAuthorizeEndpoint()}?client_id={_options.ClientId}" +
@@ -201,7 +201,7 @@ public class MicrosoftOAuthValidator : IOAuthProviderValidator
                   $"&state={state}" +
                   $"&nonce={nonce}" +
                   $"&response_mode=query";
-                  
+
         return new OAuthAuthorizationUrl(url);
     }
 
@@ -224,11 +224,11 @@ public class MicrosoftOAuthValidator : IOAuthProviderValidator
         }
 
         var tokenResponse = await response.Content.ReadFromJsonAsync<MicrosoftTokenResponse>(cancellationToken: cancellationToken);
-        if (string.IsNullOrEmpty(tokenResponse?.IdToken)) 
+        if (string.IsNullOrEmpty(tokenResponse?.IdToken))
             return OAuthIdentityResult.Failure("no_id_token", "The response from Microsoft did not contain an id_token.");
 
         var result = await ValidateIdTokenAsync(tokenResponse.IdToken, expectedNonce, cancellationToken);
-        
+
         if (result.Succeeded)
         {
             return result with
@@ -239,7 +239,7 @@ public class MicrosoftOAuthValidator : IOAuthProviderValidator
                 Scopes = tokenResponse.Scope?.Split(' ')
             };
         }
-        
+
         return result;
     }
 
@@ -261,10 +261,10 @@ public class MicrosoftOAuthValidator : IOAuthProviderValidator
         }
 
         var tokenResponse = await response.Content.ReadFromJsonAsync<MicrosoftTokenResponse>(cancellationToken: cancellationToken);
-        
+
         return new ExternalTokenRefreshResult(
-            true, 
-            tokenResponse?.AccessToken, 
+            true,
+            tokenResponse?.AccessToken,
             tokenResponse != null ? DateTimeOffset.UtcNow.AddSeconds(tokenResponse.ExpiresIn) : null,
             null);
     }

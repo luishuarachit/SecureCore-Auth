@@ -19,7 +19,7 @@ public static class MicrosoftOAuthExtensions
 
         builder.Services.AddSingleton(options);
         builder.Services.AddHttpClient<IOAuthProviderValidator, MicrosoftOAuthValidator>();
-        
+
         return builder;
     }
 }

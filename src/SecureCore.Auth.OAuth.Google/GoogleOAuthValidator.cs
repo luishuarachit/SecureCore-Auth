@@ -225,7 +225,7 @@ public class GoogleOAuthValidator : IOAuthProviderValidator
     public OAuthAuthorizationUrl BuildAuthorizationUrl(string redirectUri, string[] scopes, string state, string nonce)
     {
         var allScopes = string.Join(" ", scopes.Length > 0 ? scopes : _options.DefaultScopes);
-        
+
         // Google v2.0 Auth Endpoint
         var url = $"https://accounts.google.com/o/oauth2/v2/auth" +
                   $"?client_id={_options.ClientId}" +
@@ -235,7 +235,7 @@ public class GoogleOAuthValidator : IOAuthProviderValidator
                   $"&access_type=offline" + // Para obtener refresh_token
                   $"&state={state}" +
                   $"&nonce={nonce}";
-                  
+
         return new OAuthAuthorizationUrl(url);
     }
 
@@ -258,12 +258,12 @@ public class GoogleOAuthValidator : IOAuthProviderValidator
         }
 
         var tokenResponse = await response.Content.ReadFromJsonAsync<GoogleTokenResponse>(cancellationToken: cancellationToken);
-        
+
         if (string.IsNullOrEmpty(tokenResponse?.IdToken))
             return OAuthIdentityResult.Failure("missing_id_token", "No id_token returned from Google.");
 
         var identityResult = await ValidateIdTokenAsync(tokenResponse.IdToken, expectedNonce, cancellationToken);
-        
+
         if (identityResult.Succeeded)
         {
             return identityResult with
@@ -273,7 +273,7 @@ public class GoogleOAuthValidator : IOAuthProviderValidator
                 TokenExpiresAt = DateTimeOffset.UtcNow.AddSeconds(tokenResponse.ExpiresIn)
             };
         }
-            
+
         return identityResult;
     }
 
@@ -295,10 +295,10 @@ public class GoogleOAuthValidator : IOAuthProviderValidator
         }
 
         var tokenResponse = await response.Content.ReadFromJsonAsync<GoogleTokenResponse>(cancellationToken: cancellationToken);
-        
+
         return new ExternalTokenRefreshResult(
-            true, 
-            tokenResponse?.AccessToken, 
+            true,
+            tokenResponse?.AccessToken,
             tokenResponse != null ? DateTimeOffset.UtcNow.AddSeconds(tokenResponse.ExpiresIn) : null,
             null);
     }

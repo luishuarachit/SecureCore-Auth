@@ -19,7 +19,7 @@ public static class LinkedInOAuthExtensions
 
         builder.Services.AddSingleton(options);
         builder.Services.AddHttpClient<IOAuthProviderValidator, LinkedInOAuthValidator>();
-        
+
         return builder;
     }
 }

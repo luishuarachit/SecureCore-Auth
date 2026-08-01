@@ -39,8 +39,11 @@ public class LockoutManagerTests
     {
         var user = new UserIdentity
         {
-            Id = "u1", Email = "a@b.c", SecurityStamp = "s",
-            PasswordHash = "h", LockoutEnd = null
+            Id = "u1",
+            Email = "a@b.c",
+            SecurityStamp = "s",
+            PasswordHash = "h",
+            LockoutEnd = null
         };
 
         Assert.False(_lockoutManager.IsLockedOut(user));
@@ -51,7 +54,9 @@ public class LockoutManagerTests
     {
         var user = new UserIdentity
         {
-            Id = "u1", Email = "a@b.c", SecurityStamp = "s",
+            Id = "u1",
+            Email = "a@b.c",
+            SecurityStamp = "s",
             PasswordHash = "h",
             LockoutEnd = DateTimeOffset.UtcNow.AddMinutes(-1)
         };
@@ -64,7 +69,9 @@ public class LockoutManagerTests
     {
         var user = new UserIdentity
         {
-            Id = "u1", Email = "a@b.c", SecurityStamp = "s",
+            Id = "u1",
+            Email = "a@b.c",
+            SecurityStamp = "s",
             PasswordHash = "h",
             LockoutEnd = DateTimeOffset.UtcNow.AddMinutes(10)
         };

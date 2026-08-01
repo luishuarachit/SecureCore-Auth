@@ -3,21 +3,21 @@ using System.ComponentModel.DataAnnotations;
 namespace SecureCore.Auth.Abstractions.Options;
 
 /// <summary>
-    /// Opciones de configuración para la generación y validación de JWT.
-    /// </summary>
-    /// <remarks>
-    /// DIDÁCTICA: Un JWT (JSON Web Token) necesita tres configuraciones clave:
-    /// - Issuer ("quién lo emitió"): generalmente el dominio de tu API.
-    /// - Audience ("para quién es"): generalmente el dominio del cliente.
-    /// - Algoritmo de firma: HS256 (simétrico) o RS256/ES256 (asimétrico).
-    ///
-    /// SEGURIDAD: Recomendamos RS256 o ES256 (asimétrico) para producción:
-    /// - HS256 usa la MISMA clave para firmar y validar. Si se filtra, cualquiera puede伪造 tokens.
-    /// - RS256/ES256 usa una CLAVE PRIVADA para firmar y una CLAVE PÚBLICA para validar.
-    ///   La clave pública puede distribuirse, pero la privada debe mantenerse en secreto.
-    ///
-    /// NUNCA HARDCODEES CLAVES EN EL CÓDIGO. Usa variables de entorno o Azure Key Vault.
-    /// </remarks>
+/// Opciones de configuración para la generación y validación de JWT.
+/// </summary>
+/// <remarks>
+/// DIDÁCTICA: Un JWT (JSON Web Token) necesita tres configuraciones clave:
+/// - Issuer ("quién lo emitió"): generalmente el dominio de tu API.
+/// - Audience ("para quién es"): generalmente el dominio del cliente.
+/// - Algoritmo de firma: HS256 (simétrico) o RS256/ES256 (asimétrico).
+///
+/// SEGURIDAD: Recomendamos RS256 o ES256 (asimétrico) para producción:
+/// - HS256 usa la MISMA clave para firmar y validar. Si se filtra, cualquiera puede伪造 tokens.
+/// - RS256/ES256 usa una CLAVE PRIVADA para firmar y una CLAVE PÚBLICA para validar.
+///   La clave pública puede distribuirse, pero la privada debe mantenerse en secreto.
+///
+/// NUNCA HARDCODEES CLAVES EN EL CÓDIGO. Usa variables de entorno o Azure Key Vault.
+/// </remarks>
 public class JwtOptions
 {
     /// <summary>

@@ -65,7 +65,7 @@ public class FacebookOAuthValidator : IOAuthProviderValidator
                   $"&redirect_uri={Uri.EscapeDataString(redirectUri)}" +
                   $"&scope={Uri.EscapeDataString(allScopes)}" +
                   $"&state={state}";
-                  
+
         return new OAuthAuthorizationUrl(url);
     }
 
@@ -77,7 +77,7 @@ public class FacebookOAuthValidator : IOAuthProviderValidator
                       $"&redirect_uri={Uri.EscapeDataString(redirectUri)}" +
                       $"&client_secret={_options.ClientSecret}" +
                       $"&code={authorizationCode}";
-        
+
         var response = await _httpClient.GetAsync(tokenUrl, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
@@ -86,7 +86,7 @@ public class FacebookOAuthValidator : IOAuthProviderValidator
         }
 
         var tokenResponse = await response.Content.ReadFromJsonAsync<FacebookTokenResponse>(cancellationToken: cancellationToken);
-        if (string.IsNullOrEmpty(tokenResponse?.AccessToken)) 
+        if (string.IsNullOrEmpty(tokenResponse?.AccessToken))
             return OAuthIdentityResult.Failure("exchange_failed", "No access token returned from Facebook.");
 
         var accessToken = tokenResponse.AccessToken;
@@ -97,7 +97,7 @@ public class FacebookOAuthValidator : IOAuthProviderValidator
                         $"?fields=id,name,email,picture" +
                         $"&access_token={accessToken}" +
                         $"&appsecret_proof={proof}";
-                        
+
         var profileResponse = await _httpClient.GetAsync(profileUrl, cancellationToken);
         if (!profileResponse.IsSuccessStatusCode)
         {

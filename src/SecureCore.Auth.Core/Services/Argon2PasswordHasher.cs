@@ -90,7 +90,7 @@ public sealed class Argon2PasswordHasher(IOptions<Argon2Options> options) : IPas
 
         return PasswordVerificationResult.Success;
     }
-    
+
     // Hash ficticio para VerifyDummyPassword (m=65536, t=3, p=4)
     private const string DummyHash = "$argon2id$v=19$m=65536,t=3,p=4$c29tZXNhbHRzb21lc2FsdA$Y29tcHV0ZWRoYXNoY29tcHV0ZWRoYXNoY29tcHV0ZWRoYXNo";
 
@@ -148,8 +148,8 @@ public sealed class Argon2PasswordHasher(IOptions<Argon2Options> options) : IPas
 
     /// <inheritdoc />
     public async Task<PasswordVerificationResult> VerifyPasswordAsync(
-        string hashedPassword, 
-        string providedPassword, 
+        string hashedPassword,
+        string providedPassword,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(hashedPassword);

@@ -134,8 +134,10 @@ public class SessionOrchestratorTests
 
         var user = new UserIdentity
         {
-            Id = "u1", Email = "test@ex.com",
-            SecurityStamp = "stamp", PasswordHash = "h"
+            Id = "u1",
+            Email = "test@ex.com",
+            SecurityStamp = "stamp",
+            PasswordHash = "h"
         };
 
         _tokenService.HashRefreshToken("old-token").Returns("old-hash");
@@ -188,7 +190,9 @@ public class SessionOrchestratorTests
         // Arrange
         var entry = new RefreshTokenEntry
         {
-            TokenHash = "hash", FamilyId = "f1", UserId = "u1",
+            TokenHash = "hash",
+            FamilyId = "f1",
+            UserId = "u1",
             ExpiresAtUtc = DateTime.UtcNow.AddDays(7)
         };
 

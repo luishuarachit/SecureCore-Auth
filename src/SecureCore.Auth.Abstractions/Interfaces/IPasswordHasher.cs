@@ -87,8 +87,8 @@ public interface IPasswordHasher
     /// <param name="cancellationToken">Token de cancelación.</param>
     /// <returns>El resultado de la verificación.</returns>
     Task<PasswordVerificationResult> VerifyPasswordAsync(
-        string hashedPassword, 
-        string providedPassword, 
+        string hashedPassword,
+        string providedPassword,
         CancellationToken cancellationToken = default);
 
     /// <summary>
