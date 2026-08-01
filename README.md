@@ -88,3 +88,98 @@ Las contribuciones son bienvenidas. Asegúrate de seguir los estándares de cód
 ---
 
 Desarrollado con ❤️ por el equipo de **SecureCore**.
+
+---
+
+> **TODO (sin commitear):** Hacer el README bilingüe. Traducción al inglés a continuación:
+
+# SecureCore Auth Framework 🛡️
+
+[![Version](https://img.shields.io/badge/version-3.1.5-blue.svg)](https://github.com/luishuarachit/SecureCore-Auth)
+[![.NET](https://img.shields.io/badge/.NET-10.0-unlocked.svg)](https://dotnet.microsoft.com/)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+
+**SecureCore Auth** is a modular, database-agnostic identity and session management solution designed for modern .NET applications that need a balance between lightness and robustness.
+
+---
+
+## 🚀 Core Pillars
+
+1.  **Modern Security**: Native, prioritized support for **Passkeys (WebAuthn)** and biometrics.
+2.  **Full Session Control**: Active Refresh Token management with rotation (RTR) and **instant global revocation**.
+3.  **Total Decoupling**: You decide where and how you store your data. The library dictates the logic, not the infrastructure.
+4.  **Security by Design**: Built-in mitigations against enumeration and brute-force attacks.
+
+---
+
+## 📦 Module Structure
+
+The framework is split into independent components so you only install what you need:
+
+-   **SecureCore.Auth.Abstractions**: Contracts, interfaces and base models. No dependencies.
+-   **SecureCore.Auth.Core**: The orchestration engine, JWT logic, hashing (Argon2id) and MFA.
+-   **SecureCore.Auth.WebAuthn**: Support for security keys and biometrics (FIDO2).
+-   **SecureCore.Auth.AspNetCore**: Seamless integration with the ASP.NET Core pipeline (Middleware & Endpoints).
+-   **SecureCore.Auth.OAuth**: OAuth2/OIDC orchestration and provider token persistence.
+-   **SecureCore.Auth.OAuth.{Apple, Facebook, GitHub, Google, LinkedIn, Microsoft, TikTok}**: Provider-specific validators (JWKS, anti-replay nonce, `appsecret_proof`).
+
+---
+
+## 🛠️ Quick Start
+
+### 1. Installation
+Add the required packages to your project:
+
+```bash
+dotnet add package SecureCore.Auth.AspNetCore
+dotnet add package SecureCore.Auth.Core
+```
+
+### 2. Configuration in Program.cs
+Register the services and configure the security options:
+
+```csharp
+builder.Services.AddSecureAuth(options => {
+    options.Issuer = "your-domain.com";
+    options.Audience = "your-app";
+    options.SigningKey = builder.Configuration["Jwt:Key"];
+})
+.AddPasswordAuthentication()
+.AddWebAuthn(); // Optional
+
+var app = builder.Build();
+
+app.UseAuthentication();
+app.UseSecureAuthValidation(); // Active session validation
+app.UseAuthorization();
+
+app.MapSecureAuthEndpoints("/auth"); // Maps login, refresh, logout automatically
+```
+
+---
+
+## 🔒 Security Features
+
+-   **Argon2id**: State-of-the-art password hashing.
+-   **Refresh Token Rotation (RTR)**: Protects against token theft on clients (SPAs/Mobile).
+-   **Security Stamp Versioning (SSV)**: Invalidate all of a user's sessions instantly (Panic Button).
+-   **Constant-Time Verification**: Prevents timing attacks during credential validation.
+-   **Multi-Factor Authentication (MFA)**: TOTP (RFC 6238) and email codes with AES-256-GCM secret encryption.
+-   **OAuth2/OIDC**: Social login (Google, Microsoft, Apple, GitHub, Facebook, LinkedIn, TikTok) with cryptographic JWKS validation.
+
+---
+
+## 📄 Documentation
+
+For more details, check the extended documentation:
+-   [Usage Guide](docs/en/usage-guide.md)
+-   [Technical Reference](docs/en/technical-reference.md)
+
+---
+
+## 🤝 Contribution
+Contributions are welcome. Please follow the coding standards and keep test coverage above 90%.
+
+---
+
+Built with ❤️ by the **SecureCore** team.
