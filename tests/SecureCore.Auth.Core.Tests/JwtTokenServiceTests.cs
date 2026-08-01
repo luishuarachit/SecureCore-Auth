@@ -1,3 +1,4 @@
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SecureCore.Auth.Abstractions;
 using SecureCore.Auth.Abstractions.Models;
@@ -29,7 +30,7 @@ public class JwtTokenServiceTests
             AccessTokenLifetime = TimeSpan.FromMinutes(15)
         });
 
-        _tokenService = new JwtTokenService(jwtOptions, authOptions);
+        _tokenService = new JwtTokenService(jwtOptions, authOptions, Substitute.For<ILogger<JwtTokenService>>());
 
         _testUser = new UserIdentity
         {
@@ -167,7 +168,72 @@ public class JwtTokenServiceTests
         Assert.Contains(claims, c => c.Type == "department" && c.Value == "engineering");
     }
 
-    private JwtTokenService CreateTokenService(HashSet<string>? allowedSystemClaims = null)
+    private static IEnumerable<System.Security.Claims.Claim> ReadClaims(string jwt)
+    {
+        var handler = new System.IdentityModel.Tokens.Jwt.JwtSecurityTokenHandler();
+        var parsed = handler.ReadJwtToken(jwt);
+        return parsed.Claims;
+    }
+
+    private static TimeSpan ReadExpClaim(string jwt)
+    {
+        var handler = new System.IdentityModel.Tokens.Jwt.JwtSecurityTokenHandler();
+        var parsed = handler.ReadJwtToken(jwt);
+        return parsed.ValidTo - parsed.ValidFrom;
+    }
+
+    [Fact]
+    public async Task AccessTokenLifetimeProvider_ResolvesCustomTtl()
+    {
+        var svc = CreateTokenService(accessTokenLifetimeProvider:
+            _ => TimeSpan.FromMinutes(5));
+
+        var response = await svc.GenerateTokenPairAsync(_testUser);
+        var ttl = ReadExpClaim(response.AccessToken);
+
+        Assert.True(ttl >= TimeSpan.FromMinutes(4.5) && ttl <= TimeSpan.FromMinutes(5.5));
+        var expectedExpires = DateTimeOffset.UtcNow.Add(TimeSpan.FromMinutes(5));
+        Assert.True(response.ExpiresAt >= expectedExpires.AddSeconds(-10));
+        Assert.True(response.ExpiresAt <= expectedExpires.AddSeconds(10));
+    }
+
+    [Fact]
+    public async Task AccessTokenLifetimeProvider_ReturnsNull_UsesGlobalTtl()
+    {
+        var svc = CreateTokenService(accessTokenLifetimeProvider: _ => null);
+
+        var response = await svc.GenerateTokenPairAsync(_testUser);
+        var ttl = ReadExpClaim(response.AccessToken);
+
+        Assert.True(ttl >= TimeSpan.FromMinutes(14) && ttl <= TimeSpan.FromMinutes(16));
+    }
+
+    [Fact]
+    public async Task AccessTokenLifetimeProvider_ThrowsException_FallsBackToGlobalTtl()
+    {
+        var svc = CreateTokenService(accessTokenLifetimeProvider: _ =>
+            throw new InvalidOperationException("simulated failure"));
+
+        var response = await svc.GenerateTokenPairAsync(_testUser);
+        var ttl = ReadExpClaim(response.AccessToken);
+
+        Assert.True(ttl >= TimeSpan.FromMinutes(14) && ttl <= TimeSpan.FromMinutes(16));
+    }
+
+    [Fact]
+    public async Task AccessTokenLifetimeProvider_NullProvider_UsesGlobalTtl()
+    {
+        var svc = CreateTokenService(accessTokenLifetimeProvider: null);
+
+        var response = await svc.GenerateTokenPairAsync(_testUser);
+        var ttl = ReadExpClaim(response.AccessToken);
+
+        Assert.True(ttl >= TimeSpan.FromMinutes(14) && ttl <= TimeSpan.FromMinutes(16));
+    }
+
+    private JwtTokenService CreateTokenService(
+        HashSet<string>? allowedSystemClaims = null,
+        Func<UserIdentity, TimeSpan?>? accessTokenLifetimeProvider = null)
     {
         var jwtOptions = Options.Create(new JwtOptions
         {
@@ -180,16 +246,10 @@ public class JwtTokenServiceTests
 
         var authOptions = Options.Create(new SecureAuthOptions
         {
-            AccessTokenLifetime = TimeSpan.FromMinutes(15)
+            AccessTokenLifetime = TimeSpan.FromMinutes(15),
+            AccessTokenLifetimeProvider = accessTokenLifetimeProvider
         });
 
-        return new JwtTokenService(jwtOptions, authOptions);
-    }
-
-    private static IEnumerable<System.Security.Claims.Claim> ReadClaims(string jwt)
-    {
-        var handler = new System.IdentityModel.Tokens.Jwt.JwtSecurityTokenHandler();
-        var parsed = handler.ReadJwtToken(jwt);
-        return parsed.Claims;
+        return new JwtTokenService(jwtOptions, authOptions, Substitute.For<ILogger<JwtTokenService>>());
     }
 }

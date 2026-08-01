@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Microsoft.IdentityModel.Tokens;
@@ -31,7 +32,8 @@ namespace SecureCore.Auth.Core.Services;
 /// </remarks>
 public sealed class JwtTokenService(
     IOptions<JwtOptions> jwtOptions,
-    IOptions<SecureAuthOptions> authOptions) : ITokenService
+    IOptions<SecureAuthOptions> authOptions,
+    ILogger<JwtTokenService> logger) : ITokenService
 {
     private readonly JwtOptions _jwtOptions = jwtOptions.Value;
     private readonly SecureAuthOptions _authOptions = authOptions.Value;
@@ -97,18 +99,21 @@ public sealed class JwtTokenService(
     {
         ArgumentNullException.ThrowIfNull(user);
 
-        var accessToken = GenerateAccessToken(user);
+        var lifetime = ResolveAccessTokenLifetime(user);
+        var accessToken = GenerateAccessToken(user, lifetime);
         var refreshToken = GenerateRefreshToken();
-        var expiresAt = DateTimeOffset.UtcNow.Add(_authOptions.AccessTokenLifetime);
+        var expiresAt = DateTimeOffset.UtcNow.Add(lifetime);
 
         var response = new TokenResponse(accessToken, refreshToken, expiresAt);
         return Task.FromResult(response);
     }
 
     /// <inheritdoc />
-    public string GenerateAccessToken(UserIdentity user)
+    public string GenerateAccessToken(UserIdentity user, TimeSpan? lifetime = null)
     {
         ArgumentNullException.ThrowIfNull(user);
+
+        var effectiveLifetime = lifetime ?? _authOptions.AccessTokenLifetime;
 
         // DIDÁCTICA: Creamos las credenciales de firma según el algoritmo configurado.
         // Para RS256/ES256 (asimétrico), usamos la clave privada RSA/ECDSA.
@@ -162,7 +167,7 @@ public sealed class JwtTokenService(
                 new Claim(JwtRegisteredClaimNames.Email, user.Email),
             ]),
             Claims = claims,
-            Expires = DateTime.UtcNow.Add(_authOptions.AccessTokenLifetime),
+            Expires = DateTime.UtcNow.Add(effectiveLifetime),
             Issuer = _jwtOptions.Issuer,
             Audience = _jwtOptions.Audience,
             SigningCredentials = credentials
@@ -271,5 +276,24 @@ public sealed class JwtTokenService(
         };
 
         return _cachedSigningCredentials;
+    }
+
+    private TimeSpan ResolveAccessTokenLifetime(UserIdentity user)
+    {
+        if (_authOptions.AccessTokenLifetimeProvider is null)
+            return _authOptions.AccessTokenLifetime;
+
+        try
+        {
+            return _authOptions.AccessTokenLifetimeProvider(user)
+                   ?? _authOptions.AccessTokenLifetime;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "AccessTokenLifetimeProvider fallo para usuario {UserId}. Usando TTL global.",
+                user.Id);
+            return _authOptions.AccessTokenLifetime;
+        }
     }
 }

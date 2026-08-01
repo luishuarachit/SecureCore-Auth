@@ -248,6 +248,28 @@ public class SecureAuthOptions
     /// contra ataques distribuidos donde el atacante prueba muchas cuentas/IPs.
     /// </remarks>
     public RateLimiterOptions RateLimiter { get; set; } = new();
+
+    /// <summary>
+    /// Provider opcional para calcular el TTL del Access Token por usuario.
+    /// Si es null o devuelve null, se usa <see cref="AccessTokenLifetime"/> global.
+    /// </summary>
+    /// <remarks>
+    /// Útil para defensa en profundidad con TTL por rol (superadmin 15m, admin 30m,
+    /// support 1h). Requiere que el claim necesario (ej. "role") fluya al token
+    /// vía <c>JwtOptions.AllowedSystemClaims</c>.
+    ///
+    /// Ejemplo:
+    /// <code>
+    /// options.AccessTokenLifetimeProvider = user =>
+    ///     user.Claims?.GetValueOrDefault("role") switch
+    ///     {
+    ///         "superadmin" => TimeSpan.FromMinutes(15),
+    ///         "admin"      => TimeSpan.FromMinutes(30),
+    ///         _            => null // usa el TTL global
+    ///     };
+    /// </code>
+    /// </remarks>
+    public Func<UserIdentity, TimeSpan?>? AccessTokenLifetimeProvider { get; set; }
 }
 
 /// <summary>

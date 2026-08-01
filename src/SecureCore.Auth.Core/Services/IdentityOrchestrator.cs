@@ -63,6 +63,12 @@ public sealed class IdentityOrchestrator(
             passwordHasher.VerifyDummyPassword(password);
 
             logger.LogDebug("Intento de login fallido: usuario no encontrado para email proporcionado");
+            await eventDispatcher.DispatchAsync(new AuthEvent
+            {
+                EventType = AuthEventType.AnonymousLoginFailed,
+                TimestampUtc = DateTime.UtcNow
+            }, cancellationToken);
+
             return (SignInResult.Failed, null, null);
         }
 

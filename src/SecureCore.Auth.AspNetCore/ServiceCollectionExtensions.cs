@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
@@ -371,8 +372,13 @@ public static class ServiceCollectionExtensions
         services.AddScoped<SecurityStampValidator>();
         services.AddScoped<LockoutManager>();
 
-        // Registrar el despachador de eventos (con handlers extensibles)
-        services.AddScoped<IAuthEventDispatcher, AuthEventDispatcher>();
+        // Registrar el despachador de eventos con enriquecimiento de contexto HTTP
+        services.TryAddSingleton<IHttpContextAccessor, HttpContextAccessor>();
+        services.AddScoped<AuthEventDispatcher>();
+        services.AddScoped<IAuthEventDispatcher>(sp =>
+            new AuthEventContextEnricher(
+                sp.GetRequiredService<IHttpContextAccessor>(),
+                sp.GetRequiredService<AuthEventDispatcher>()));
 
         // Configurar autenticación JWT Bearer
         services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)

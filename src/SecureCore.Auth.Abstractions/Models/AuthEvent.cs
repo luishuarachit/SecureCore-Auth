@@ -20,9 +20,10 @@ public record AuthEvent
     public required AuthEventType EventType { get; init; }
 
     /// <summary>
-    /// ID del usuario relacionado con el evento.
+    /// ID del usuario relacionado con el evento. Null para eventos anónimos
+    /// (ej. login fallido con email desconocido, rate limit excedido).
     /// </summary>
-    public required string UserId { get; init; }
+    public string? UserId { get; init; }
 
     /// <summary>
     /// Fecha/hora UTC en que ocurrió el evento.
@@ -88,5 +89,20 @@ public enum AuthEventType
     MfaVerificationFailed,
 
     /// <summary>Usuario deshabilitó MFA.</summary>
-    MfaDisabled
+    MfaDisabled,
+
+    /// <summary>Rate limit excedido (por IP o por cuenta).</summary>
+    RateLimitExceeded,
+
+    /// <summary>Intento de login anónimo fallido (email/usuario no existe).</summary>
+    AnonymousLoginFailed,
+
+    /// <summary>Verificación de Passkey fallida.</summary>
+    PasskeyVerificationFailed,
+
+    /// <summary>Security Stamp cambiado (revocación global ejecutada).</summary>
+    SecurityStampChanged,
+
+    /// <summary>Cambio de contraseña fallido (contraseña actual incorrecta).</summary>
+    PasswordChangeFailed
 }
