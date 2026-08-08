@@ -46,6 +46,7 @@ public static class SecureAuthEndpoints
             LoginRequest request,
             IdentityOrchestrator orchestrator,
             IRateLimiter rateLimiter,
+            IAuthEventDispatcher eventDispatcher,
             HttpContext httpContext,
             CancellationToken ct) =>
         {
@@ -55,6 +56,12 @@ public static class SecureAuthEndpoints
             var ipAddress = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
             if (!rateLimiter.IsAllowed(ipAddress))
             {
+                await eventDispatcher.DispatchAsync(new Abstractions.Models.AuthEvent
+                {
+                    EventType = Abstractions.Models.AuthEventType.RateLimitExceeded,
+                    TimestampUtc = DateTime.UtcNow
+                }, ct);
+
                 return Results.Json(
                     new { error = "too_many_requests", message = "Demasiados intentos. Intenta más tarde." },
                     statusCode: StatusCodes.Status429TooManyRequests);

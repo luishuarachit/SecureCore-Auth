@@ -27,8 +27,11 @@ public interface ITokenService
     /// Genera únicamente un Access Token (JWT) para el usuario.
     /// </summary>
     /// <param name="user">La identidad del usuario.</param>
+    /// <param name="lifetime">
+    /// TTL del token. Si es null, se usa <c>SecureAuthOptions.AccessTokenLifetime</c> global.
+    /// </param>
     /// <returns>El JWT como string codificado.</returns>
-    string GenerateAccessToken(UserIdentity user);
+    string GenerateAccessToken(UserIdentity user, TimeSpan? lifetime = null);
 
     /// <summary>
     /// Genera un Refresh Token criptográficamente seguro.

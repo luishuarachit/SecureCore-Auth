@@ -5,6 +5,27 @@ Todas los cambios notables en este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 y este proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.7] - 2026-08-01
+
+### Añadido (integración de feat/audit-and-per-role-ttl)
+- **Enriquecimiento automático de eventos de auditoría con contexto HTTP**:
+  - `AuthEventContextEnricher`: decorator de `IAuthEventDispatcher` que captura `ip`, `path`, `ua` (User-Agent), `xff` (X-Forwarded-For) y `roles` del usuario autenticado desde `HttpContext`.
+  - Se registra automáticamente en DI sin configuración adicional. Sin HttpContext (tests), el enricher no lanza error.
+  - `IHttpContextAccessor` se registra como singleton si no existe.
+- **Nuevos `AuthEventType` para auditoría**:
+  - `AnonymousLoginFailed`: intento de login con email/usuario inexistente (UserId=null, sin datos sensibles en Metadata).
+  - `RateLimitExceeded`: rate limit de IP excedido en `/auth/login` (UserId=null).
+  - `PasskeyVerificationFailed`, `SecurityStampChanged`, `PasswordChangeFailed`: reservados para uso futuro.
+- **`AuthEvent.UserId` ahora es nullable** (`string?`) para soportar eventos anónimos sin usuario identificado.
+- **Per-role Access Token Lifetime**:
+  - `SecureAuthOptions.AccessTokenLifetimeProvider`: `Func<UserIdentity, TimeSpan?>` configurable para TTL por rol.
+  - `JwtTokenService` resuelve el provider durante `GenerateTokenPairAsync`. Fallback al TTL global (fail-secure).
+  - `ITokenService.GenerateAccessToken` acepta `TimeSpan? lifetime` opcional (backwards compatible).
+
+### Corregido
+- `IdentityOrchestrator.SignInWithPasswordAsync` dispara `AnonymousLoginFailed` cuando el email/usuario no existe.
+- `SecureAuthEndpoints.MapPost("/login")` dispara `RateLimitExceeded` antes del 429.
+
 ## [3.1.6] - 2026-08-01
 
 ### Corregido
@@ -39,6 +60,32 @@ y este proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.
 
 ### Seguridad
 - Auditoría interna T1–T11: 3 hallazgos adicionales corregidos (usuario atascado en Pending, acortamiento de lockout de contraseña, reuso de código TOTP en login).
+
+## [3.1.5] - 2026-08-01
+
+### Añadido
+- **Enriquecimiento automático de eventos de auditoría con contexto HTTP**:
+  - `AuthEventContextEnricher`: decorator de `IAuthEventDispatcher` que captura `ip`, `path`, `ua` (User-Agent), `xff` (X-Forwarded-For) y `roles` del usuario autenticado desde `HttpContext`.
+  - Se registra automáticamente en DI sin configuración adicional. Sin HttpContext (tests), el enricher no lanza error.
+  - `IHttpContextAccessor` se registra como singleton si no existe.
+
+- **Nuevos `AuthEventType` para auditoría**:
+  - `AnonymousLoginFailed`: intento de login con email/usuario inexistente (UserId=null, sin datos sensibles en Metadata).
+  - `RateLimitExceeded`: rate limit de IP excedido en `/auth/login` (UserId=null).
+  - `PasskeyVerificationFailed`, `SecurityStampChanged`, `PasswordChangeFailed`: reservados para uso futuro en PasskeyService y SessionOrchestrator.
+
+- **`AuthEvent.UserId` ahora es nullable** (`string?`) para soportar eventos anónimos sin usuario identificado.
+
+- **Per-role Access Token Lifetime**:
+  - `SecureAuthOptions.AccessTokenLifetimeProvider`: `Func<UserIdentity, TimeSpan?>` configurable para TTL por rol (superadmin 15m, admin 30m, support 1h).
+  - `JwtTokenService` resuelve el provider durante `GenerateTokenPairAsync`. Si null, lanza excepción o devuelve null → fallback al `AccessTokenLifetime` global (fail-secure).
+  - `ITokenService.GenerateAccessToken` acepta `TimeSpan? lifetime` opcional (backwards compatible).
+  - Requiere que el claim `role` fluya vía `JwtOptions.AllowedSystemClaims` (corregido en v3.1.4).
+
+### Corregido
+
+- `IdentityOrchestrator.SignInWithPasswordAsync` ahora dispara `AnonymousLoginFailed` cuando el email/usuario no existe (antes retornaba Failed sin evento).
+- `SecureAuthEndpoints.MapPost("/login")` ahora dispara `RateLimitExceeded` antes del 429 (antes retornaba directamente sin evento).
 
 ## [3.1.4] - 2026-08-01
 
