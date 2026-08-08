@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using SecureCore.Auth.Abstractions;
 using SecureCore.Auth.Abstractions.Interfaces;
 using SecureCore.Auth.Abstractions.Models;
 using SecureCore.Auth.Abstractions.Options;
@@ -44,6 +45,12 @@ public sealed class MfaOrchestrator : IMfaService
     private readonly MfaOptions _options;
     private readonly ILogger<MfaOrchestrator> _logger;
 
+    /// <summary>
+    /// Ventana de tolerancia TOTP (±1 paso de 30s = 60s) durante la cual un código
+    /// ya usado no puede reutilizarse en el enrollment.
+    /// </summary>
+    private const int TotpReuseWindowSeconds = 60;
+
     public MfaOrchestrator(
         IUserStore userStore,
         ITotpService totpService,
@@ -83,11 +90,31 @@ public sealed class MfaOrchestrator : IMfaService
         if (!_options.AllowedMethods.Contains(method.ToString().ToLowerInvariant()))
             throw new InvalidOperationException($"Método MFA '{method}' no está permitido.");
 
-        var mfaToken = await _mfaSessionStore.CreateMfaSessionTokenAsync(
-            userId, method.ToString(), _options.MfaSessionTokenMinutes, cancellationToken);
+        // S3 (P3): Proteger el secreto contra overwrite. Un usuario ya enrolado no
+        // puede ser re-enrolado sin deshabilitar MFA primero (evita que un atacante
+        // con acceso a StartEnrollmentAsync sobrescriba el secreto TOTP activo con
+        // uno que él controla y luego lo complete con un código que él mismo genera).
+        if (user.MfaEnrollmentStatus == MfaEnrollmentStatus.Enrolled)
+        {
+            throw new InvalidOperationException(
+                "El usuario ya tiene MFA activo. Deshabilite MFA antes de re-enrolar.");
+        }
+
+        // T4 (P3): Si ya hay un enrollment pendiente con un secreto TOTP generado,
+        // no sobrescribirlo. Evita el race de enrollments solapados: un segundo
+        // StartEnrollmentAsync invalidaría el QR que el usuario legítimo está
+        // escaneando (y permitiría a un atacante completar el flujo con un secreto
+        // que él controla).
+        if (user.MfaEnrollmentStatus == MfaEnrollmentStatus.Pending &&
+            !string.IsNullOrEmpty(user.TotpSecretEncrypted))
+        {
+            throw new InvalidOperationException(
+                "El usuario ya tiene un enrollment MFA pendiente. Complete el enrollment actual antes de iniciar otro.");
+        }
 
         string? authUri = null;
         string? emailCode = null;
+        string? secretFingerprint = null;
 
         switch (method)
         {
@@ -98,6 +125,10 @@ public sealed class MfaOrchestrator : IMfaService
                 var encryptedSecret = _encryptionService.Encrypt(secret);
                 await _userStore.SetTotpSecretAsync(userId, encryptedSecret, cancellationToken);
                 await _userStore.UpdateMfaEnrollmentAsync(userId, MfaEnrollmentStatus.Pending, "totp", cancellationToken);
+
+                // T5 (P3): Fingerprint del secreto para validar en la completación que
+                // el secreto no cambió desde el inicio del enrollment (anti-race/TOCTOU).
+                secretFingerprint = ComputeHash(secret);
                 break;
 
             case MfaMethod.Email:
@@ -122,6 +153,9 @@ public sealed class MfaOrchestrator : IMfaService
                 throw new ArgumentException($"Método MFA '{method}' no soportado.");
         }
 
+        var mfaToken = await _mfaSessionStore.CreateMfaSessionTokenAsync(
+            userId, method.ToString(), _options.MfaSessionTokenMinutes, secretFingerprint, cancellationToken);
+
         _logger.LogInformation("Enrollment MFA iniciado para usuario {UserId}, método: {Method}", userId, method);
 
         return new MfaEnrollmentResponse(method, authUri, mfaToken);
@@ -130,14 +164,41 @@ public sealed class MfaOrchestrator : IMfaService
     public async Task<bool> CompleteEnrollmentAsync(
         string userId,
         string code,
+        string mfaSessionToken,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(mfaSessionToken);
+
+        // S2 (P2): Vincular el enrollment al token de sesión. Solo quien inició el
+        // enrollment (recibió el mfaSessionToken de StartEnrollmentAsync) puede
+        // completarlo. Validamos y consumimos (single-use) como hace el login.
+        var tokenUserId = await _mfaSessionStore.ValidateMfaSessionTokenAsync(mfaSessionToken, cancellationToken);
+        if (tokenUserId is null || !string.Equals(tokenUserId, userId, StringComparison.Ordinal))
+        {
+            _logger.LogWarning("Enrollment MFA rechazado: token de sesión inválido o de otro usuario");
+            return false;
+        }
+
         var user = await _userStore.FindByIdAsync(userId, cancellationToken);
         if (user is null)
             return false;
 
         if (user.MfaEnrollmentStatus != MfaEnrollmentStatus.Pending)
             return false;
+
+        // T7 (P4): Límite de intentos de verificación de enrollment (mismo control
+        // que VerifyAsync). Evita fuerza bruta sobre el código de enrollment.
+        if (user.MfaFailedAttemptsCount >= _options.MaxVerificationAttempts)
+        {
+            // T8/T9 (P5): Lockout temporal (no permanente). Si la ventana expiró,
+            // se resetea el contador y se permite reintentar.
+            var lockedOut = await IsMfaLockedOutAsync(user, userId, cancellationToken);
+            if (lockedOut)
+            {
+                _logger.LogWarning("Usuario {UserId} bloqueado temporalmente por enrollment MFA", userId);
+                return false;
+            }
+        }
 
         var method = user.PreferredMfaMethod?.ToLowerInvariant() ?? "totp";
         bool isValid;
@@ -148,6 +209,31 @@ public sealed class MfaOrchestrator : IMfaService
                 return false;
 
             var secret = _encryptionService.Decrypt(user.TotpSecretEncrypted);
+
+            // T5 (P3): Validar que el secreto no cambió desde que se inició el enrollment.
+            // El token contiene el fingerprint del secreto al momento del Start. Si el
+            // secreto fue sobrescrito entre Start y Complete (enrollment concurrente /
+            // TOCTOU), el fingerprint no coincide y se rechaza la completación.
+            var tokenFingerprint = await _mfaSessionStore.GetMfaSessionTokenFingerprintAsync(mfaSessionToken, cancellationToken);
+            var currentFingerprint = ComputeHash(secret);
+            if (!string.IsNullOrEmpty(tokenFingerprint) &&
+                !CryptographicOperations.FixedTimeEquals(
+                    Encoding.ASCII.GetBytes(tokenFingerprint),
+                    Encoding.ASCII.GetBytes(currentFingerprint)))
+            {
+                _logger.LogWarning("Enrollment MFA rechazado: el secreto TOTP cambió durante el enrollment para usuario {UserId}", userId);
+                return false;
+            }
+
+            // T6 (P4): Single-use del código TOTP dentro de la ventana de tolerancia.
+            // Si el código ya fue usado para completar el enrollment, se rechaza el reuso.
+            var totpUsedKey = GetTotpUsedCodeKey(userId);
+            if (await _mfaCodeStore.ValidateAndRemoveCodeAsync(totpUsedKey, code, cancellationToken))
+            {
+                _logger.LogWarning("Enrollment MFA rechazado: código TOTP reutilizado para usuario {UserId}", userId);
+                return false;
+            }
+
             isValid = _totpService.ValidateCode(secret, code);
         }
         else if (method == "email")
@@ -160,14 +246,32 @@ public sealed class MfaOrchestrator : IMfaService
             return false;
         }
 
-        // DIDÁCTICA: Solo retornamos false si el código es inválido.
-        // Si el código no existe (expirado/ya usado), ValidateAndRemoveCodeAsync
-        // retorna false, y aquí lo tratamos como fallo de validación.
         if (!isValid)
         {
-            _logger.LogWarning("Código de enrollment MFA inválido para usuario {UserId}", userId);
+            // T7 (P4): Incrementar el contador de intentos fallidos de enrollment.
+            var newCount = await _userStore.IncrementMfaFailedAttemptsAsync(userId, cancellationToken);
+            _logger.LogWarning("Código de enrollment MFA inválido para usuario {UserId}, intentos: {Count}", userId, newCount);
+
+            // T8 (P5): Bloquear temporalmente al alcanzar el máximo de intentos.
+            await ApplyMfaLockoutIfNeededAsync(newCount, userId, user.LockoutEnd, cancellationToken);
             return false;
         }
+
+        // T6 (P4): Marcar el código TOTP como usado (single-use dentro de la ventana).
+        if (method == "totp")
+        {
+            await _mfaCodeStore.StoreCodeHashAsync(
+                GetTotpUsedCodeKey(userId),
+                ComputeHash(code),
+                TimeSpan.FromSeconds(TotpReuseWindowSeconds),
+                cancellationToken);
+        }
+
+        // T7 (P4): Resetear el contador de intentos fallidos al completar con éxito.
+        await _userStore.ResetMfaFailedAttemptsAsync(userId, cancellationToken);
+
+        // Consumir el token de sesión (single-use) para que no pueda reutilizarse.
+        await _mfaSessionStore.ConsumeMfaSessionTokenAsync(mfaSessionToken, cancellationToken);
 
         await _userStore.UpdateMfaEnrollmentAsync(userId, MfaEnrollmentStatus.Enrolled, method, cancellationToken);
 
@@ -208,8 +312,14 @@ public sealed class MfaOrchestrator : IMfaService
 
         if (user.MfaFailedAttemptsCount >= _options.MaxVerificationAttempts)
         {
-            _logger.LogWarning("Usuario {UserId} ha excedido los intentos máximos de verificación MFA", userId);
-            return new MfaVerificationResult(false, "Demasiados intentos. Intente más tarde.", null);
+            // T8/T9 (P5): Lockout temporal (no permanente). Si la ventana expiró,
+            // se resetea el contador y se permite reintentar.
+            var lockedOut = await IsMfaLockedOutAsync(user, userId, cancellationToken);
+            if (lockedOut)
+            {
+                _logger.LogWarning("Usuario {UserId} bloqueado temporalmente por verificación MFA", userId);
+                return new MfaVerificationResult(false, "Demasiados intentos. Intente más tarde.", null);
+            }
         }
 
         var method = user.PreferredMfaMethod?.ToLowerInvariant() ?? "totp";
@@ -220,6 +330,15 @@ public sealed class MfaOrchestrator : IMfaService
             if (string.IsNullOrEmpty(user.TotpSecretEncrypted))
             {
                 return new MfaVerificationResult(false, "Configuración MFA inválida", null);
+            }
+
+            // T6 (P4): Single-use del código TOTP dentro de la ventana de tolerancia.
+            // Evita reutilizar un código capturado para re-verificar el login.
+            var totpUsedKey = GetTotpUsedCodeKey(userId);
+            if (await _mfaCodeStore.ValidateAndRemoveCodeAsync(totpUsedKey, code, cancellationToken))
+            {
+                _logger.LogWarning("Verificación MFA rechazada: código TOTP reutilizado para usuario {UserId}", userId);
+                return new MfaVerificationResult(false, "Código inválido", null);
             }
 
             var secret = _encryptionService.Decrypt(user.TotpSecretEncrypted);
@@ -240,6 +359,9 @@ public sealed class MfaOrchestrator : IMfaService
             var newCount = await _userStore.IncrementMfaFailedAttemptsAsync(userId, cancellationToken);
             _logger.LogWarning("Verificación MFA fallida para usuario {UserId}, intentos: {Count}", userId, newCount);
 
+            // T8 (P5): Bloquear temporalmente al alcanzar el máximo de intentos.
+            await ApplyMfaLockoutIfNeededAsync(newCount, userId, user.LockoutEnd, cancellationToken);
+
             await _eventDispatcher.DispatchAsync(new Abstractions.Models.AuthEvent
             {
                 EventType = Abstractions.Models.AuthEventType.MfaVerificationFailed,
@@ -252,6 +374,16 @@ public sealed class MfaOrchestrator : IMfaService
             }, cancellationToken);
 
             return new MfaVerificationResult(false, "Código inválido", null);
+        }
+
+        // T6 (P4): Marcar el código TOTP como usado (single-use dentro de la ventana).
+        if (method == "totp")
+        {
+            await _mfaCodeStore.StoreCodeHashAsync(
+                GetTotpUsedCodeKey(userId),
+                ComputeHash(code),
+                TimeSpan.FromSeconds(TotpReuseWindowSeconds),
+                cancellationToken);
         }
 
         await _userStore.ResetMfaFailedAttemptsAsync(userId, cancellationToken);
@@ -280,7 +412,12 @@ public sealed class MfaOrchestrator : IMfaService
         if (user is null)
             return false;
 
-        if (user.MfaEnrollmentStatus != MfaEnrollmentStatus.Enrolled)
+        // Permite "cancelar" un enrollment pendiente (T4): si el token de sesión del
+        // enrollment expiró (5 min por defecto) o el usuario abandonó el flujo, no debe
+        // quedar atascado en Pending sin forma de salir. Deshabilitar desde Pending
+        // cancela el enrollment y permite iniciar uno nuevo.
+        if (user.MfaEnrollmentStatus != MfaEnrollmentStatus.Enrolled &&
+            user.MfaEnrollmentStatus != MfaEnrollmentStatus.Pending)
             return false;
 
         // DIDÁCTICA: Solo verificamos la contraseña si el usuario realmente tiene una.
@@ -386,5 +523,76 @@ public sealed class MfaOrchestrator : IMfaService
     private static string GetEmailCodeKey(string userId)
     {
         return $"mfa_email_code:{userId}";
+    }
+
+    /// <summary>
+    /// Genera la clave de caché para el código TOTP ya usado en el enrollment.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: Evita el reuso del mismo código TOTP dentro de la ventana de
+    /// tolerancia (±1 paso). La clave incluye el userId para aislamiento entre usuarios.
+    /// </remarks>
+    private static string GetTotpUsedCodeKey(string userId)
+    {
+        return $"mfa_totp_used_code:{userId}";
+    }
+
+    /// <summary>
+    /// T8/T9 (P5): Determina si el usuario está temporalmente bloqueado por
+    /// exceder los intentos de verificación MFA.
+    /// </summary>
+    /// <returns>
+    /// true si el lockout está activo (bloqueado). false si no hay lockout o si
+    /// la ventana de <c>CodeRetryWindowMinutes</c> ya expiró (en cuyo caso se
+    /// resetea el contador y se desbloquea, T9).
+    /// </returns>
+    private async Task<bool> IsMfaLockedOutAsync(
+        UserIdentity user,
+        string userId,
+        CancellationToken cancellationToken)
+    {
+        // Sin lockout previo → no bloqueado
+        if (user.LockoutEnd is null)
+            return false;
+
+        // Lockout activo → bloqueado temporalmente
+        if (user.LockoutEnd > DateTimeOffset.UtcNow)
+            return true;
+
+        // Lockout expirado → resetear contador y desbloquear (T9)
+        _logger.LogInformation("Ventana de reintentos MFA expirada para usuario {UserId}. Reset de contador.", userId);
+        await _userStore.ResetMfaFailedAttemptsAsync(userId, cancellationToken);
+        await _userStore.SetLockoutEndAsync(userId, null, cancellationToken);
+        return false;
+    }
+
+    /// <summary>
+    /// T8 (P5): Aplica el lockout temporal (LockoutEnd = UtcNow + CodeRetryWindowMinutes)
+    /// cuando el contador de intentos fallidos alcanza <c>MaxVerificationAttempts</c>.
+    /// </summary>
+    /// <remarks>
+    /// No sobrescribe un lockout activo existente (p.ej. el lockout de contraseña
+    /// gestionado por LockoutManager) para no acortarlo. Si el usuario ya está
+    /// bloqueado, se conserva el lockout existente.
+    /// </remarks>
+    private async Task ApplyMfaLockoutIfNeededAsync(
+        int newFailedCount,
+        string userId,
+        DateTimeOffset? currentLockoutEnd,
+        CancellationToken cancellationToken)
+    {
+        if (newFailedCount < _options.MaxVerificationAttempts)
+            return;
+
+        // No sobrescribir un lockout activo existente (no acortar el de contraseña).
+        if (currentLockoutEnd is not null && currentLockoutEnd > DateTimeOffset.UtcNow)
+            return;
+
+        var lockoutEnd = DateTimeOffset.UtcNow.AddMinutes(_options.CodeRetryWindowMinutes);
+        await _userStore.SetLockoutEndAsync(userId, lockoutEnd, cancellationToken);
+        _logger.LogWarning(
+            "Usuario {UserId} bloqueado temporalmente por {Minutes} minutos tras exceder intentos MFA",
+            userId,
+            _options.CodeRetryWindowMinutes);
     }
 }

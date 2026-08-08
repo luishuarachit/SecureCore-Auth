@@ -23,12 +23,28 @@ public interface IMfaSessionStore
     /// <param name="userId">ID del usuario.</param>
     /// <param name="method">Método MFA que se verificará.</param>
     /// <param name="validMinutes">Minutos de validez (default: 5).</param>
+    /// <param name="secretFingerprint">
+    /// Fingerprint (hash) del secreto TOTP al momento de iniciar el enrollment.
+    /// Se usa en CompleteEnrollment para verificar que el secreto no cambió
+    /// entre el inicio y la completación (anti-race). Null para métodos sin secreto (email).
+    /// </param>
     /// <param name="cancellationToken">Token de cancelación.</param>
     /// <returns>Token JWT temporal.</returns>
     Task<string> CreateMfaSessionTokenAsync(
         string userId,
         string method,
         int validMinutes = 5,
+        string? secretFingerprint = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Valida un token de sesión MFA y extrae el fingerprint del secreto asociado.
+    /// </summary>
+    /// <param name="token">Token JWT temporal.</param>
+    /// <param name="cancellationToken">Token de cancelación.</param>
+    /// <returns>El fingerprint del secreto o null si no existe / token inválido.</returns>
+    Task<string?> GetMfaSessionTokenFingerprintAsync(
+        string token,
         CancellationToken cancellationToken = default);
 
     /// <summary>
