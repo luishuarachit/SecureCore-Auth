@@ -102,23 +102,28 @@ public sealed class TotpService : ITotpService
 
     private static string Base32Encode(byte[] data)
     {
-        var result = new StringBuilder();
-        var bitsRemaining = data.Length * 8;
+        ArgumentNullException.ThrowIfNull(data);
+
+        var result = new StringBuilder((data.Length * 8 + 4) / 5);
+        var buffer = 0;
+        var bitsLeft = 0;
 
         foreach (var b in data)
         {
-            result.Append(Base32Alphabet[(b >> 3) & 0x1F]);
-            bitsRemaining -= 5;
-            if (bitsRemaining >= 5)
+            buffer = (buffer << 8) | b;
+            bitsLeft += 8;
+
+            while (bitsLeft >= 5)
             {
-                result.Append(Base32Alphabet[(b << 2) & 0x1F]);
-                bitsRemaining -= 5;
+                result.Append(Base32Alphabet[(buffer >> (bitsLeft - 5)) & 0x1F]);
+                bitsLeft -= 5;
             }
-            else if (bitsRemaining > 0)
-            {
-                result.Append(Base32Alphabet[(b << (5 - (bitsRemaining - 5))) & 0x1F]);
-                bitsRemaining = 0;
-            }
+        }
+
+        // Últimos bits sobrantes (0-4): se rellenan con ceros para completar un carácter.
+        if (bitsLeft > 0)
+        {
+            result.Append(Base32Alphabet[(buffer << (5 - bitsLeft)) & 0x1F]);
         }
 
         return result.ToString();

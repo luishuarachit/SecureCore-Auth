@@ -110,7 +110,7 @@ public sealed class IdentityOrchestrator(
         {
             var method = user.PreferredMfaMethod ?? "totp";
             var mfaToken = await mfaSessionStore.CreateMfaSessionTokenAsync(
-                user.Id, method, _mfaOptions.MfaSessionTokenMinutes, cancellationToken);
+                user.Id, method, _mfaOptions.MfaSessionTokenMinutes, null, cancellationToken);
 
             if (user.MfaEnrollmentStatus != MfaEnrollmentStatus.Enrolled)
             {

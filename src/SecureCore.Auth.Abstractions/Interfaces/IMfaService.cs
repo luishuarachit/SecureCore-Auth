@@ -18,9 +18,18 @@ public interface IMfaService
     /// <summary>
     /// Completa el enrollment verificando el código inicial.
     /// </summary>
+    /// <param name="userId">ID del usuario.</param>
+    /// <param name="code">Código MFA de verificación.</param>
+    /// <param name="mfaSessionToken">
+    /// Token de sesión MFA devuelto por <see cref="StartEnrollmentAsync"/>. Se valida
+    /// y consume (single-use) para garantizar que solo quien inició el enrollment
+    /// puede completarlo.
+    /// </param>
+    /// <param name="cancellationToken">Token de cancelación.</param>
     Task<bool> CompleteEnrollmentAsync(
         string userId,
         string code,
+        string mfaSessionToken,
         CancellationToken cancellationToken = default);
 
     /// <summary>

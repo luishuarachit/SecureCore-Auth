@@ -16,6 +16,7 @@ public sealed class JwtMfaSessionService(
 {
     private const string ClaimMfaMethod = "mfa_method";
     private const string ClaimPurpose = "purpose";
+    private const string ClaimSecretFingerprint = "secret_fingerprint";
     private const string PurposeMfaVerify = "mfa_verify";
 
     private readonly JwtOptions _jwtOptions = jwtOptions.Value;
@@ -25,19 +26,25 @@ public sealed class JwtMfaSessionService(
         string userId,
         string method,
         int validMinutes = 5,
+        string? secretFingerprint = null,
         CancellationToken cancellationToken = default)
     {
         var jti = Guid.NewGuid().ToString("N");
         var now = DateTimeOffset.UtcNow;
         var expires = now.AddMinutes(validMinutes);
 
-        var claims = new[]
+        var claims = new List<Claim>
         {
-            new Claim(JwtRegisteredClaimNames.Sub, userId),
-            new Claim(JwtRegisteredClaimNames.Jti, jti),
-            new Claim(ClaimMfaMethod, method),
-            new Claim(ClaimPurpose, PurposeMfaVerify)
+            new(JwtRegisteredClaimNames.Sub, userId),
+            new(JwtRegisteredClaimNames.Jti, jti),
+            new(ClaimMfaMethod, method),
+            new(ClaimPurpose, PurposeMfaVerify)
         };
+
+        if (!string.IsNullOrEmpty(secretFingerprint))
+        {
+            claims.Add(new Claim(ClaimSecretFingerprint, secretFingerprint));
+        }
 
         var tokenDescriptor = new SecurityTokenDescriptor
         {
@@ -70,10 +77,38 @@ public sealed class JwtMfaSessionService(
         return ValidateAndExtractUserIdAsync(token, false, cancellationToken);
     }
 
+    public Task<string?> GetMfaSessionTokenFingerprintAsync(
+        string token,
+        CancellationToken cancellationToken = default)
+    {
+        var principal = ValidateAndGetPrincipal(token);
+        if (principal is null)
+            return Task.FromResult<string?>(null);
+
+        var fingerprint = principal.Claims
+            .FirstOrDefault(c => c.Type == ClaimSecretFingerprint)?.Value;
+
+        return Task.FromResult<string?>(fingerprint);
+    }
+
     private Task<string?> ValidateAndExtractUserIdAsync(
         string token,
         bool consume,
         CancellationToken cancellationToken)
+    {
+        var principal = ValidateAndGetPrincipal(token);
+        if (principal is null)
+            return Task.FromResult<string?>(null);
+
+        var purpose = principal.Claims.FirstOrDefault(c => c.Type == ClaimPurpose)?.Value;
+        if (purpose != PurposeMfaVerify)
+            return Task.FromResult<string?>(null);
+
+        var userId = principal.Claims.FirstOrDefault(c => c.Type == JwtRegisteredClaimNames.Sub)?.Value;
+        return Task.FromResult<string?>(userId);
+    }
+
+    private ClaimsPrincipal? ValidateAndGetPrincipal(string token)
     {
         try
         {
@@ -89,18 +124,11 @@ public sealed class JwtMfaSessionService(
                 ClockSkew = TimeSpan.Zero
             };
 
-            var validatedToken = _tokenHandler.ValidateToken(token, validationParameters, out _);
-
-            var purpose = validatedToken.Claims.FirstOrDefault(c => c.Type == ClaimPurpose)?.Value;
-            if (purpose != PurposeMfaVerify)
-                return Task.FromResult<string?>(null);
-
-            var userId = validatedToken.Claims.FirstOrDefault(c => c.Type == JwtRegisteredClaimNames.Sub)?.Value;
-            return Task.FromResult<string?>(userId);
+            return _tokenHandler.ValidateToken(token, validationParameters, out _);
         }
         catch
         {
-            return Task.FromResult<string?>(null);
+            return null;
         }
     }
 

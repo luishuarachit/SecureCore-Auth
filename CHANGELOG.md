@@ -5,6 +5,41 @@ Todas los cambios notables en este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 y este proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.6] - 2026-08-01
+
+### Corregido
+- **`Base32Encode` no cumplía RFC 4648 (TOTP)** — pérdida de entropía y secreto malformado:
+  - El encoder procesaba byte a byte en lugar de agrupar de a 5 bits cruzando límites de byte. Un secreto de 20 bytes colapsaba de 160 a ~140 bits de entropía efectiva y generaba 40 caracteres en vez de 32.
+  - Reescrito con acumulador de bits (RFC 4648). `Base32Decode(Base32Encode(bytes)) == bytes` garantizado. Backwards-compatible con secretos existentes (la app y la librería decodifican el mismo string).
+  - Validado contra vectores RFC 6238/4648/4226 conocidos.
+
+- **`CompleteEnrollmentAsync` no vinculaba el enrollment al token de sesión (brecha)**:
+  - Cualquier llamada con `userId` + código válido completaba el enrollment sin el `mfaSessionToken` de `StartEnrollmentAsync`.
+  - Ahora se valida y consume el token (single-use), replicando el patrón del login MFA.
+
+- **`StartEnrollmentAsync` sobrescribía el secreto TOTP sin control**:
+  - No rechazaba re-enrollment de un usuario ya enrolado ni un enrollment pendiente con secreto, permitiendo que un atacante sobrescribiera el secreto activo con uno propio.
+  - Ahora se rechaza si el usuario está `Enrolled` o si hay un enrollment `Pending` con secreto. `DisableAsync` permite cancelar un enrollment pendiente (evita quedar atascado si el token expiró).
+
+- **Race (TOCTOU) entre Start y Complete del enrollment**:
+  - Se embebe un fingerprint (SHA-256) del secreto TOTP en el `mfaSessionToken`. Si el secreto cambia entre Start y Complete, se rechaza la completación.
+
+- **Single-use del código TOTP (enrollment y login)**:
+  - El mismo código TOTP ya no puede completar el enrollment ni verificar el login dos veces dentro de la ventana de tolerancia (±1 paso). Se marca como usado en `IMfaCodeStore`.
+
+- **Límite de intentos en enrollment**:
+  - `CompleteEnrollmentAsync` ahora aplica `MaxVerificationAttempts` (incrementa al fallar, resetea al acertar).
+
+- **`CodeRetryWindowMinutes` no se aplicaba — bloqueo MFA permanente**:
+  - Al superar `MaxVerificationAttempts` se fija `LockoutEnd = UtcNow + CodeRetryWindowMinutes` (lockout temporal, no permanente).
+  - Al expirar la ventana se resetea el contador automáticamente.
+  - No sobrescribe un lockout de contraseña activo más largo.
+
+- **`JwtMfaSessionService`**: refactor de validación para soportar el claim `secret_fingerprint` en el token de sesión MFA.
+
+### Seguridad
+- Auditoría interna T1–T11: 3 hallazgos adicionales corregidos (usuario atascado en Pending, acortamiento de lockout de contraseña, reuso de código TOTP en login).
+
 ## [3.1.4] - 2026-08-01
 
 ### Corregido

@@ -1,6 +1,6 @@
 # SecureCore Auth Framework 🛡️
 
-[![Version](https://img.shields.io/badge/version-3.1.4-blue.svg)](https://github.com/luishuarachit/SecureCore-Auth)
+[![Version](https://img.shields.io/badge/version-3.1.6-blue.svg)](https://github.com/luishuarachit/SecureCore-Auth)
 [![.NET](https://img.shields.io/badge/.NET-10.0-unlocked.svg)](https://dotnet.microsoft.com/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 

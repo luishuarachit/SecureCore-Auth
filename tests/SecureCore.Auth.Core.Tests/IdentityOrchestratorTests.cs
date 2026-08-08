@@ -46,7 +46,7 @@ public class IdentityOrchestratorTests
             AllowedMethods = new List<string> { "totp", "email" }
         });
 
-        _mfaSessionStore.CreateMfaSessionTokenAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<int>(), Arg.Any<CancellationToken>())
+        _mfaSessionStore.CreateMfaSessionTokenAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<int>(), Arg.Any<string?>(), Arg.Any<CancellationToken>())
             .Returns(Task.FromResult("mfa-session-token"));
 
         _lockoutManager = new LockoutManager(
