@@ -1,6 +1,7 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
+using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using SecureCore.Auth.Abstractions.Interfaces;
@@ -12,7 +13,8 @@ namespace SecureCore.Auth.Core.Services;
 /// Implementación de IMfaSessionStore usando JWT como token temporal.
 /// </summary>
 public sealed class JwtMfaSessionService(
-    IOptions<JwtOptions> jwtOptions) : IMfaSessionStore
+    IOptions<JwtOptions> jwtOptions,
+    IMemoryCache cache) : IMfaSessionStore
 {
     private const string ClaimMfaMethod = "mfa_method";
     private const string ClaimPurpose = "purpose";
@@ -21,6 +23,7 @@ public sealed class JwtMfaSessionService(
 
     private readonly JwtOptions _jwtOptions = jwtOptions.Value;
     private readonly JwtSecurityTokenHandler _tokenHandler = new();
+    private readonly IMemoryCache _cache = cache;
 
     public Task<string> CreateMfaSessionTokenAsync(
         string userId,
@@ -81,7 +84,7 @@ public sealed class JwtMfaSessionService(
         string token,
         CancellationToken cancellationToken = default)
     {
-        var principal = ValidateAndGetPrincipal(token);
+        var principal = ValidateAndGetPrincipal(token, out _);
         if (principal is null)
             return Task.FromResult<string?>(null);
 
@@ -96,7 +99,7 @@ public sealed class JwtMfaSessionService(
         bool consume,
         CancellationToken cancellationToken)
     {
-        var principal = ValidateAndGetPrincipal(token);
+        var principal = ValidateAndGetPrincipal(token, out var validatedToken);
         if (principal is null)
             return Task.FromResult<string?>(null);
 
@@ -104,12 +107,31 @@ public sealed class JwtMfaSessionService(
         if (purpose != PurposeMfaVerify)
             return Task.FromResult<string?>(null);
 
-        var userId = principal.Claims.FirstOrDefault(c => c.Type == JwtRegisteredClaimNames.Sub)?.Value;
+        // jti desde SecurityToken.Id (agnóstico al mapeo de claims del handler).
+        var jti = validatedToken?.Id;
+        if (string.IsNullOrEmpty(jti))
+            return Task.FromResult<string?>(null);
+
+        // Single-use (v3.1.8): si el jti ya fue consumido, se rechaza tanto la
+        // validación como un nuevo consumo.
+        if (_cache.TryGetValue(jti, out _))
+            return Task.FromResult<string?>(null);
+
+        if (consume)
+        {
+            _cache.Set(jti, true, absoluteExpiration: validatedToken!.ValidTo);
+        }
+
+        // Fix (v3.1.8): JwtSecurityTokenHandler.ValidateToken mapea el claim "sub"
+        // a ClaimTypes.NameIdentifier por defecto, así que se lee cualquiera de ambos.
+        var userId = principal.Claims.FirstOrDefault(c => c.Type == JwtRegisteredClaimNames.Sub)?.Value
+                     ?? principal.Claims.FirstOrDefault(c => c.Type == ClaimTypes.NameIdentifier)?.Value;
         return Task.FromResult<string?>(userId);
     }
 
-    private ClaimsPrincipal? ValidateAndGetPrincipal(string token)
+    private ClaimsPrincipal? ValidateAndGetPrincipal(string token, out SecurityToken? validatedToken)
     {
+        validatedToken = null;
         try
         {
             var validationParameters = new TokenValidationParameters
@@ -124,7 +146,9 @@ public sealed class JwtMfaSessionService(
                 ClockSkew = TimeSpan.Zero
             };
 
-            return _tokenHandler.ValidateToken(token, validationParameters, out _);
+            var principal = _tokenHandler.ValidateToken(token, validationParameters, out var outToken);
+            validatedToken = outToken;
+            return principal;
         }
         catch
         {

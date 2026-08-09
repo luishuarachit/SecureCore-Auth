@@ -503,6 +503,8 @@ public interface IMfaCodeStore
 Hardening of MFA enrollment and verification:
 
 1. **Enrollment bound to the session token**: `CompleteEnrollmentAsync(userId, code, mfaSessionToken)` validates that the `mfaSessionToken` belongs to the `userId` and **consumes** it (single-use). Only whoever started the enrollment can complete it.
+
+> **v3.1.8 (fix)**: token single-use is now real. The consumed `jti` is registered in `IMemoryCache` (expiration = token `ValidTo`); reuse returns `null`. The `sub` claim is also read as `ClaimTypes.NameIdentifier` (due to `JwtSecurityTokenHandler` claim mapping). Note: the blacklist is in-memory (single-instance); for multi-instance, replace `IMfaSessionStore` with a distributed implementation.
 2. **TOTP secret anti-overwrite**: `StartEnrollmentAsync` rejects if the user is `Enrolled` or if there is a `Pending` enrollment with a secret. `DisableAsync` can cancel a pending enrollment (prevents getting stuck if the token expired).
 3. **Anti-TOCTOU (fingerprint)**: a SHA-256 hash of the secret is embedded in the `mfaSessionToken`. If the secret changes between Start and Complete, completion is rejected.
 4. **TOTP code single-use**: the same code cannot complete the enrollment or verify the login twice within the tolerance window (±1 step). It is marked as used in `IMfaCodeStore` (key `mfa_totp_used_code:{userId}`).

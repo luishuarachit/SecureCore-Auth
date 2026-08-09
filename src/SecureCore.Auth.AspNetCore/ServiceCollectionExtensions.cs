@@ -65,6 +65,7 @@ public class SecureAuthBuilder(IServiceCollection services)
         Services.AddSingleton<IPasswordHasher, Argon2PasswordHasher>();
 
         Services.AddSingleton<ITotpService, TotpService>();
+        Services.AddMemoryCache();
         Services.AddSingleton<IMfaSessionStore, JwtMfaSessionService>();
         Services.AddSingleton<IMfaEncryptionService, AesMfaEncryptionService>();
         Services.AddScoped<IEmailMfaService, EmailMfaService>();
@@ -177,6 +178,7 @@ public class SecureAuthBuilder(IServiceCollection services)
             .ValidateOnStart();
 
         Services.AddSingleton<ITotpService, TotpService>();
+        Services.AddMemoryCache();
         Services.AddSingleton<IMfaSessionStore, JwtMfaSessionService>();
         Services.AddSingleton<IMfaEncryptionService, AesMfaEncryptionService>();
         Services.AddScoped<IEmailMfaService, EmailMfaService>();
