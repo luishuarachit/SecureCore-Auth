@@ -5,6 +5,22 @@ Todas los cambios notables en este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 y este proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [3.1.8] - 2026-08-01
+
+### Corregido
+- **`JwtMfaSessionService` no leía el claim `sub` tras el mapeo del handler (enrollment/login MFA bloqueados)**:
+  - `JwtSecurityTokenHandler.ValidateToken` mapea el claim `sub` a `ClaimTypes.NameIdentifier` en el `ClaimsPrincipal` devuelto. `ValidateAndExtractUserIdAsync` solo buscaba `JwtRegisteredClaimNames.Sub` → siempre devolvía `null` → `CompleteEnrollmentAsync` y `CompleteMfaLoginAsync` fallaban con "token de sesión inválido o de otro usuario".
+  - Ahora se lee `sub` **o** `NameIdentifier` (patrón consistente con `SecureAuthEndpoints`).
+
+- **`ConsumeMfaSessionTokenAsync` no implementaba single-use real**:
+  - El parámetro `consume` se ignoraba y no había blacklist de `jti` → un token de sesión MFA (5 min) era reutilizable, contradiciendo el contrato documentado.
+  - Ahora el `jti` consumido se guarda en `IMemoryCache` (expiración = `ValidTo` del token). Una segunda `ValidateMfaSessionTokenAsync` o `ConsumeMfaSessionTokenAsync` devuelve `null`.
+  - `AddMemoryCache()` se registra automáticamente en DI.
+  - **Nota**: el blacklist es in-memory (single-instance), igual que `InMemoryRateLimiter`/`InMemoryOperationLock`. Para despliegues multi-instancia, sustituir `IMfaSessionStore` por una implementación distribuida.
+
+### Seguridad
+- Tests nuevos con el servicio REAL (`JwtMfaSessionServiceTests`): lectura de `sub`, single-use del token, tokens de issuer incorrecto/inválidos, fingerprint.
+
 ## [3.1.7] - 2026-08-01
 
 ### Añadido (integración de feat/audit-and-per-role-ttl)
