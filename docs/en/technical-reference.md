@@ -512,6 +512,23 @@ Hardening of MFA enrollment and verification:
 6. **Temporary lockout (not permanent)**: when `MaxVerificationAttempts` is exceeded, `LockoutEnd = UtcNow + CodeRetryWindowMinutes` is set. When the window expires, the counter resets automatically. An active, longer password lockout is not overwritten.
 7. **Base32 RFC 4648**: `TotpService` generates 20-byte secrets → 32 characters, without entropy loss (fixes the previous encoder that produced 40 characters and ~140 effective bits).
 
+#### 7.11.1. Post-enrollment flow — authentication suggestion
+
+`CompleteEnrollmentAsync` returns `true` when the user verifies a valid enrollment code. That moment constitutes **real proof of possession of the MFA factor**. The library does **not** automatically issue tokens on enrollment completion; the continuation policy is the implementer's decision.
+
+**Available building blocks** (all public): `CompleteEnrollmentAsync`, `VerifyAsync`, `CompleteMfaLoginAsync`, `ITokenService.GenerateTokenPairAsync`, `ISessionStore.CreateAsync`.
+
+**Suggestion**: treat a successful enrollment completion as a completed MFA verification and issue the session with the `amr=mfa` + `mfa_method` markers, without re-requesting a code.
+
+**Valid alternatives**: later re-authentication with a new code (e.g., after 30 seconds), password + new code, or any other policy defined by the implementer.
+
+**Bad practices to avoid:**
+1. Reusing the same TOTP code from the enrollment for an immediate login verification (fails due to code single-use, ±1 step window; designed behavior, not a bug).
+2. Issuing `amr=mfa` or tokens without `CompleteEnrollmentAsync` returning `true`.
+3. Not persisting the refresh token in `ISessionStore` when issuing a post-enrollment session (orphaned / non-revocable session).
+4. Not resetting `MfaFailedAttemptsCount` after a successful enrollment.
+5. Leaving the enrollment `mfaSessionToken` reusable (it must be consumed, single-use).
+
 ### 7.8. OAuthClaimHelper — Secure OIDC Claim Extraction
 
 Static helper in `SecureCore.Auth.OAuth` that extracts claims from `JwtSecurityToken` preserving the original short JWT claim types (avoiding the URI mapping done by `ClaimsPrincipal`):

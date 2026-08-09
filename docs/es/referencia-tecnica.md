@@ -442,6 +442,23 @@ Endurecimiento del enrollment y verificación MFA:
 6. **Lockout temporal (no permanente)**: al superar `MaxVerificationAttempts` se fija `LockoutEnd = UtcNow + CodeRetryWindowMinutes`. Al expirar la ventana, el contador se resetea automáticamente. No sobrescribe un lockout de contraseña activo más largo.
 7. **Base32 RFC 4648**: `TotpService` genera secretos de 20 bytes → 32 caracteres, sin pérdida de entropía (corrige el encoder anterior que producía 40 caracteres y ~140 bits efectivos).
 
+#### 7.11.1. Flujo post-enrollment — sugerencia de autenticación
+
+`CompleteEnrollmentAsync` retorna `true` cuando el usuario verifica un código de enrollment válido. Ese momento constituye una **prueba real de posesión del factor MFA**. La librería **no** emite tokens automáticamente al completar el enrollment; la política de continuación es decisión del implementador.
+
+**Herramientas disponibles** (todas públicas): `CompleteEnrollmentAsync`, `VerifyAsync`, `CompleteMfaLoginAsync`, `ITokenService.GenerateTokenPairAsync`, `ISessionStore.CreateAsync`.
+
+**Sugerencia**: tratar la completación exitosa del enrollment como una verificación MFA completada y emitir la sesión con la marca `amr=mfa` + `mfa_method`, sin re-solicitar código.
+
+**Alternativas válidas**: re-autenticación posterior con un nuevo código (p. ej. tras 30 segundos), contraseña + nuevo código, o cualquier otra política definida por el implementador.
+
+**Malas prácticas a evitar:**
+1. Reutilizar el mismo código TOTP del enrollment para la verificación de login inmediata (falla por single-use del código, ventana ±1 paso; es comportamiento diseñado, no un bug).
+2. Emitir `amr=mfa` o tokens sin que `CompleteEnrollmentAsync` haya retornado `true`.
+3. No persistir el refresh token en `ISessionStore` al emitir sesión post-enrollment (sesión huérfana / no revocable).
+4. No resetear `MfaFailedAttemptsCount` tras un enrollment exitoso.
+5. Dejar reutilizable el `mfaSessionToken` del enrollment (debe consumirse, single-use).
+
 ### 7.8. OAuthClaimHelper — Extracción Segura de Claims OIDC
 
 Helper estático en `SecureCore.Auth.OAuth` que extrae claims de `JwtSecurityToken` preservando los tipos cortos originales del JWT (evitando el mapeo a URIs que hace `ClaimsPrincipal`):

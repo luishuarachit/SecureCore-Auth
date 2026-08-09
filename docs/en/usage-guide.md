@@ -828,6 +828,24 @@ POST /auth/mfa/verify-code
 
 > **v3.1.6 — Enrollment hardening**: the `mfaSessionToken` is mandatory and single-use (validated and consumed on completion). The TOTP code is also single-use within the tolerance window (±1 step). `CompleteEnrollmentAsync` applies `MaxVerificationAttempts`; exceeding it locks the user for `CodeRetryWindowMinutes` (temporary lockout, not permanent). The TOTP secret cannot be overwritten by re-enrollment without disabling MFA first.
 
+#### Post-enrollment flow — marking the user as MFA-authenticated (suggestion)
+
+When `CompleteEnrollmentAsync` returns `true`, the user has proven possession of the MFA factor (entered a valid code). From that point, how to continue authentication is the **implementer's** decision. The library does not automatically issue tokens on enrollment completion; it provides the building blocks (`CompleteEnrollmentAsync`, `VerifyAsync`, `CompleteMfaLoginAsync`, `ITokenService`) and the implementer defines the policy.
+
+**Suggested flow** (one valid option, not the only one): treat a successful enrollment completion as a completed MFA verification and issue the session with the `amr=mfa` and `mfa_method` markers, without asking for another code.
+
+**Equally valid alternatives** the implementer may choose:
+- Force the user to enter another code shortly after (e.g., 30 seconds) to re-authenticate.
+- Require password + a new verification code.
+- Any other re-authentication policy the implementer considers appropriate for their risk level.
+
+**⚠️ Bad practices to avoid:**
+1. **Reusing the same TOTP code from the enrollment for an immediate login verification** — it will fail due to code single-use (tolerance window ±1 step). This is not a bug: it is the designed behavior of the library.
+2. **Issuing `amr=mfa` or tokens without `CompleteEnrollmentAsync` returning `true`** — never mark the user as MFA-authenticated without a real code verification.
+3. **Not persisting the refresh token in the `ISessionStore`** when issuing the session after enrollment — leaves an orphaned, non-revocable session.
+4. **Not resetting the failed-attempt counters** (`MfaFailedAttemptsCount`) after a successful enrollment.
+5. **Leaving the enrollment `mfaSessionToken` reusable** — it must be consumed (single-use) to prevent re-completing the flow.
+
 **⚠️ Additional Security Requirements**:
 The implementer MUST integrate a CAPTCHA solution (Cloudflare Turnstile, hCAPTCHA, reCAPTCHA) to protect MFA enrollment and password reset endpoints against automation. The library does not include CAPTCHA by default.
 
