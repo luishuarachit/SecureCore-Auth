@@ -826,6 +826,8 @@ POST /auth/mfa/verify-code
 { "mfaSessionToken": "eyJ...", "code": "123456" }
 ```
 
+> **v3.1.6 — Enrollment hardening**: the `mfaSessionToken` is mandatory and single-use (validated and consumed on completion). The TOTP code is also single-use within the tolerance window (±1 step). `CompleteEnrollmentAsync` applies `MaxVerificationAttempts`; exceeding it locks the user for `CodeRetryWindowMinutes` (temporary lockout, not permanent). The TOTP secret cannot be overwritten by re-enrollment without disabling MFA first.
+
 **⚠️ Additional Security Requirements**:
 The implementer MUST integrate a CAPTCHA solution (Cloudflare Turnstile, hCAPTCHA, reCAPTCHA) to protect MFA enrollment and password reset endpoints against automation. The library does not include CAPTCHA by default.
 

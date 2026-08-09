@@ -91,7 +91,7 @@ Desarrollado con ❤️ por el equipo de **SecureCore**.
 
 ---
 
-> **TODO (sin commitear):** Hacer el README bilingüe. Traducción al inglés a continuación:
+## English
 
 # SecureCore Auth Framework 🛡️
 

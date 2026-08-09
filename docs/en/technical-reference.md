@@ -49,6 +49,24 @@ Defines session lifecycle parameters and lockout policies.
 | `SecurityStampCacheDuration` | `TimeSpan` | 1 min | Required |
 | `LoginRateLimitMaxAttempts` | `int` | 10 | [1, 1000] |
 | `LoginRateLimitWindow` | `TimeSpan` | 1 min | Required |
+| `AccessTokenLifetimeProvider` (v3.1.5) | `Func<UserIdentity, TimeSpan?>` | null | Optional |
+
+#### Per-Role Access Token Lifetime (v3.1.5)
+
+`AccessTokenLifetimeProvider` resolves the Access Token TTL per user (defense in depth: superadmin 15m, admin 30m, support 1h). If `null` or returns `null`, the global `AccessTokenLifetime` is used.
+
+```csharp
+options.AccessTokenLifetimeProvider = user =>
+    user.Claims?.GetValueOrDefault("role") switch
+    {
+        "superadmin" => TimeSpan.FromMinutes(15),
+        "admin"      => TimeSpan.FromMinutes(30),
+        "support"    => TimeSpan.FromHours(1),
+        _            => null // use global TTL
+    };
+```
+
+**REQUIREMENTS**: the `role` claim must flow to the JWT via `JwtOptions.AllowedSystemClaims` (see section 7.5). If not configured, the provider receives empty `Claims` → returns null → global TTL (fail-secure). If the provider throws, a warning is logged and the global TTL is used (availability is preserved).
 
 #### AccessTokenLifetime Configuration Guide
 
@@ -335,20 +353,32 @@ services.AddSecureAuth(options => { ... })
 ## 6. Security and Observability
 
 ### 6.1. Event System
-The system dispatches asynchronous domain events via `IAuthEventDispatcher`.
+The system dispatches asynchronous domain events via `IAuthEventDispatcher`. The implementer can subscribe by registering an `IAuthEventHandler` handler in DI.
 
 **Key Events:**
 - `LoginSuccess`: Successful login processed.
 - `LoginFailed`: Invalid credential (with attempt metadata).
+- `AccountLockedOut`: Account locked after too many failed attempts.
+- `TokenRotated`: Refresh Token rotated successfully.
+- `Logout` / `GlobalLogout`: Single-session / all-sessions logout.
 - `SuspiciousActivityDetected`: Detected attempt to reuse a previously rotated Refresh Token.
+- `PasskeyRegistered` / `PasskeyLoginSuccess`: WebAuthn/Passkey registration and login.
 - `PasswordResetRequested`: Reset request initiated by email.
 - `PasswordResetCompleted`: Successful password change via token.
+- `MfaEnrolled` / `MfaDisabled` / `MfaVerificationSuccess` / `MfaVerificationFailed`: MFA flow events.
+- `AnonymousLoginFailed` (v3.1.5): Login attempt with non-existent email/user. `UserId = null`, no sensitive data in Metadata (anti-enumeration).
+- `RateLimitExceeded` (v3.1.5): IP rate limit exceeded on `/auth/login`. `UserId = null`.
+- `PasskeyVerificationFailed`, `SecurityStampChanged`, `PasswordChangeFailed` (v3.1.5): Reserved for future use.
 
-**MFA Events:**
-- `MfaEnrolled`: MFA successfully enrolled by user.
-- `MfaVerificationSuccess`: MFA verification passed.
-- `MfaVerificationFailed`: MFA verification failed (with attempt metadata).
-- `MfaDisabled`: MFA disabled by user.
+**Automatic HTTP context enrichment (v3.1.5):**
+`AuthEventContextEnricher` is a decorator of `IAuthEventDispatcher` registered automatically in DI. It adds to `Metadata` without implementer intervention:
+- `ip`: `RemoteIpAddress` (real TCP connection IP).
+- `path`: request path.
+- `ua`: `User-Agent` header.
+- `xff`: `X-Forwarded-For` header (spoofable; stored separately from `ip`).
+- `roles`: role claims of the authenticated user (from the `ClaimsPrincipal` already validated by the JWT middleware).
+
+**`AuthEvent.UserId` nullable (v3.1.5):** enables anonymous events (`AnonymousLoginFailed`, `RateLimitExceeded`) without an identified user. Handlers must validate `UserId` before acting on it.
 
 ### 6.2. Enumeration Mitigation
 The framework guarantees constant response time on authentication failures by injecting dummy hashing operations when the user is not found in the data store.
@@ -414,6 +444,10 @@ Interface implemented by all provider validators.
 options.Jwt.AllowedSystemClaims = new HashSet<string> { "role", "roles" };
 ```
 
+> **v3.1.4 (fix)**: The Fluent API now propagates `AllowedSystemClaims` to the effective `JwtOptions`. Previously, configuring it only via the Fluent API left the set empty (RBAC broken). `appsettings.json` binding (`SecureAuth:Jwt:AllowedSystemClaims`) remains supported.
+
+> **v3.1.5**: `ITokenService.GenerateAccessToken(UserIdentity, TimeSpan? lifetime = null)` accepts an optional TTL. If null, the global TTL or the one resolved by `AccessTokenLifetimeProvider` is used.
+
 **Claims blocked by default:**
 - **Identity**: `sub`, `email`, `name`
 - **Token control**: `jti`, `iss`, `aud`, `exp`, `iat`, `nbf`
@@ -463,6 +497,18 @@ public interface IMfaCodeStore
 - Codes are stored as SHA-256 hashes, never in plaintext.
 - Validation uses `CryptographicOperations.FixedTimeEquals` to prevent timing attacks.
 - Codes are single-use: removed after the first validation attempt.
+
+### 7.11. MFA/TOTP Flow Security (v3.1.6)
+
+Hardening of MFA enrollment and verification:
+
+1. **Enrollment bound to the session token**: `CompleteEnrollmentAsync(userId, code, mfaSessionToken)` validates that the `mfaSessionToken` belongs to the `userId` and **consumes** it (single-use). Only whoever started the enrollment can complete it.
+2. **TOTP secret anti-overwrite**: `StartEnrollmentAsync` rejects if the user is `Enrolled` or if there is a `Pending` enrollment with a secret. `DisableAsync` can cancel a pending enrollment (prevents getting stuck if the token expired).
+3. **Anti-TOCTOU (fingerprint)**: a SHA-256 hash of the secret is embedded in the `mfaSessionToken`. If the secret changes between Start and Complete, completion is rejected.
+4. **TOTP code single-use**: the same code cannot complete the enrollment or verify the login twice within the tolerance window (±1 step). It is marked as used in `IMfaCodeStore` (key `mfa_totp_used_code:{userId}`).
+5. **Enrollment rate limit**: `CompleteEnrollmentAsync` applies `MaxVerificationAttempts` (increments on failure, resets on success).
+6. **Temporary lockout (not permanent)**: when `MaxVerificationAttempts` is exceeded, `LockoutEnd = UtcNow + CodeRetryWindowMinutes` is set. When the window expires, the counter resets automatically. An active, longer password lockout is not overwritten.
+7. **Base32 RFC 4648**: `TotpService` generates 20-byte secrets → 32 characters, without entropy loss (fixes the previous encoder that produced 40 characters and ~140 effective bits).
 
 ### 7.8. OAuthClaimHelper — Secure OIDC Claim Extraction
 
