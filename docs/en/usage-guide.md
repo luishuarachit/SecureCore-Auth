@@ -1293,6 +1293,8 @@ builder.Services.AddSingleton<IRateLimiter>(sp =>
 });
 ```
 
+> **⚠️ Proper use of X-Forwarded-For**: the `X-Forwarded-For` (XFF) header **must not be used as a rate-limiting key**. The library uses `Connection.RemoteIpAddress` (the real TCP connection IP) for the `/auth/login` rate limit, and the TOTP verification/enrollment rate limit is **per-user** (`MfaFailedAttemptsCount`). Sending a forged XFF **does not bypass** those limits. If your custom `IRateLimiter` uses XFF as its key, **an attacker can bypass it by forging the header**. To use the real client IP behind a proxy (nginx, LB, Cloudflare), configure ASP.NET Core `UseForwardedHeaders` (which validates the header's origin against trusted proxies).
+
 ### Critical Operation Locks (IOperationLock)
 
 To prevent race conditions in refresh token rotation, the library uses `IOperationLock`. It works automatically in single-instance; for multi-instance, implement your own version:

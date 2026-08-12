@@ -308,6 +308,18 @@ El sistema despacha eventos de dominio asíncronos mediante `IAuthEventDispatche
 ### 6.2. Mitigación contra Enumeración
 El framework garantiza un tiempo de respuesta constante en fallos de autenticación mediante la inyección de operaciones de hashing ficticias cuando no se localiza el usuario en el almacén de datos.
 
+### 6.3. Uso adecuado de X-Forwarded-For
+
+El header `X-Forwarded-For` (XFF) es informativo y **no se usa como clave de rate limiting ni como base de decisiones de seguridad** en la librería:
+
+- **Rate limit por IP** (`/auth/login`): usa `Connection.RemoteIpAddress` (la IP real de la conexión TCP), **no** lee `X-Forwarded-For`. Enviar XFF no lo evade.
+- **Verificación TOTP y enrollment**: el rate limit es **per-usuario** (`MfaFailedAttemptsCount`), independiente de la IP o del XFF.
+- **Auditoría**: `AuthEventContextEnricher` guarda `xff` como metadato informativo, separado de `ip` (que es la IP real de la conexión).
+
+**Cuándo usar XFF**: solo si la API está detrás de un proxy inverso (nginx, HAProxy, load balancer, Cloudflare), donde `RemoteIpAddress` es la IP del proxy. En ese caso, configure `ForwardedHeaders` de ASP.NET Core (`UseForwardedHeaders`) para que `RemoteIpAddress` refleje la IP real del cliente de forma **controlada** (solo confiando en los proxies configurados). Sin eso, detrás de un proxy todos los usuarios comparten la clave de rate limit.
+
+**Riesgo**: si un implementador implementa un `IRateLimiter` personalizado usando el header `X-Forwarded-For` como clave, **un atacante puede evadir el rate limit falsificando el header**. No lo haga sin validar el origen del header (proxies de confianza).
+
 ---
 
 ## 7. Ecosistema OAuth 2.0 / OIDC (v2.0.0)

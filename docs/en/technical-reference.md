@@ -383,6 +383,18 @@ The system dispatches asynchronous domain events via `IAuthEventDispatcher`. The
 ### 6.2. Enumeration Mitigation
 The framework guarantees constant response time on authentication failures by injecting dummy hashing operations when the user is not found in the data store.
 
+### 6.3. Proper use of X-Forwarded-For
+
+The `X-Forwarded-For` (XFF) header is informational and is **not** used as a rate-limiting key or as the basis for security decisions in the library:
+
+- **IP rate limit** (`/auth/login`): uses `Connection.RemoteIpAddress` (the real TCP connection IP), it does **not** read `X-Forwarded-For`. Sending XFF does not bypass it.
+- **TOTP verification and enrollment**: the rate limit is **per-user** (`MfaFailedAttemptsCount`), independent of the IP or XFF.
+- **Auditing**: `AuthEventContextEnricher` stores `xff` as informational metadata, separate from `ip` (the real connection IP).
+
+**When to use XFF**: only when the API is behind a reverse proxy (nginx, HAProxy, load balancer, Cloudflare), where `RemoteIpAddress` is the proxy's IP. In that case, configure ASP.NET Core `ForwardedHeaders` (`UseForwardedHeaders`) so `RemoteIpAddress` reflects the real client IP in a **controlled** way (only trusting the configured proxies). Without this, behind a proxy all users share the same rate-limit key.
+
+**Risk**: if an implementer builds a custom `IRateLimiter` that uses the `X-Forwarded-For` header as its key, **an attacker can bypass the rate limit by forging the header**. Do not do this without validating the header's origin (trusted proxies).
+
 ---
 
 ## 7. OAuth 2.0 / OIDC Ecosystem (v2.0.0)
