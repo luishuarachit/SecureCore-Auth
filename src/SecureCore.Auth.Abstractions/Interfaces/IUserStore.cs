@@ -142,6 +142,13 @@ public interface IUserStore
     /// <param name="userId">ID del usuario.</param>
     /// <param name="codeHashes">Lista de hashes SHA-256.</param>
     /// <param name="cancellationToken">Token de cancelación.</param>
+    /// <remarks>
+    /// OBSOLETO (auditoría F5): el flujo legacy de enrollment escribía aquí hashes que nadie
+    /// redimía y descartaba el texto plano (A-18). Los recovery codes de primera clase se generan
+    /// con <c>RecoveryCodeOrchestrator.GenerateAsync</c> (que devuelve el plaintext una sola vez)
+    /// y se persisten en su propio store de redención. Se conserva por compatibilidad; eliminar en v4.
+    /// </remarks>
+    [Obsolete("Use RecoveryCodeOrchestrator.GenerateAsync instead. This method will be removed in a future version.")]
     Task SetRecoveryCodesAsync(
         string userId,
         List<string> codeHashes,

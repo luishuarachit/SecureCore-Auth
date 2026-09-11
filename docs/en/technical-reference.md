@@ -55,6 +55,7 @@ Defines session lifecycle parameters and lockout policies.
 | `MfaVerifiedTtl` (v3.2.0, S3) | `TimeSpan` | 8 h | "mfa_verified" window; ≤ 0 → 8 h fallback (see §4.9) |
 | `EmitAcr` (v3.2.0, S3) | `bool` | false | Emits the `acr` claim on every token (opt-in) |
 | `AcrLevel` (v3.2.0, S3) | `string` | "1" | Value of the `acr` claim when `EmitAcr` is on |
+| `EmitAmr` (v3.2.0, F6) | `bool` | false | Emits `amr` consistently (RFC 8176): password→`pwd`, WebAuthn adds `mfa_method=webauthn` (opt-in) |
 
 #### Per-Role Access Token Lifetime (v3.1.5)
 
@@ -316,8 +317,11 @@ the default is registered with `TryAddScoped`: implement your own distributed ve
 ### 4.1. IdentityOrchestrator
 Coordinates the authentication flow. It contains no cryptographic logic but orchestrates each step.
 
-- **`SignInWithPasswordAsync(email, password)`**: Executes lookup, lockout validation, constant-time hashing, and token generation.
+- **`SignInWithPasswordAsync(email, string? password)`** (F6, A-25): Executes lookup, lockout validation, constant-time hashing, and token generation.
   - Implements `VerifyDummyPassword` to mitigate timing attacks if the user is not found.
+  - **First-class nullable password**: `password == null` → `SignInResult.PasswordlessRequiresCredential` **without touching the store** (a REQUEST-level signal, uniform for every email → no enumeration oracle). `VerifyDummyPassword` only runs with a non-null password.
+  - `SignInResult` exposes a typed `ErrorCode` (`SignInErrorCode`) for the host to drive its UX programmatically: `InvalidCredentials`, `AccountLockedOut`, `TwoFactorRequired`, `TwoFactorRegistrationRequired`, `PasswordlessRequiresCredential`, `GenericFailure`. **Security rule**: do not expose `ErrorCode` to unauthenticated clients (distinguishing codes would be an enumeration oracle); the framework keeps HTTP responses uniform.
+  - The success path fires `LoginSuccess` with metadata `method=password` and, when `EmitAmr` is enabled, the `amr=pwd` claim (RFC 8176).
 - **`SignInExternalAsync(provider, providerKey)`**: Processes login for users authenticated via OAuth (Google, GitHub, etc.). Links external identity with a local session.
 - **`CompleteMfaLoginWithRecoveryCodeAsync(mfaSessionToken, recoveryCode, rotateSecurityStamp, ct)`** (v3.2.0, A1 F5 audit): completes login with an already-redeemed recovery code. Unlike `CompleteMfaLoginAsync` (which requires a TOTP/email `mfaCode`), this flow redeems the recovery code (single-use via `RecoveryCodeOrchestrator.UseAsync`), consumes the session token, issues tokens with `amr=mfa`/`mfa_method=recovery` and opens the `mfa_verified` window (S3 parity). The `rotateSecurityStamp` flag (host policy) rotates the SecurityStamp, invalidates its cache and revokes **all** previous sessions (recommended after a lost/stolen MFA device); with `false`, the current session and stamp are kept. The S1 lockout (scope `Recovery`) maps to a generic login failure (cause not revealed). Requires `AddMfa()` (returns `Failed` without a registered `RecoveryCodeOrchestrator`).
 
@@ -632,6 +636,10 @@ claim; responses use generic messages; 503 when the orchestrator is not register
 - `POST /verify-action/verify`: `{ code }` — consumes the OTP and opens the window.
 - `POST /create-password`: `{ newPassword }` — creates a password (requires an open step-up window; no `otp` in the body).
 - `POST /change-password`: `{ currentPassword, newPassword }` — changes the password (no step-up).
+
+**F6 (v3.2.0) — authenticated profile**:
+
+- `GET /me` — authenticated user profile (Bearer): `{ id, email, hasPassword, twoFactorEnabled, mfaEnrollmentStatus, preferredMfaMethod }`. `hasPassword` is read from the store on every call (never from a claim, which would lie after creating a password). 503 `me_not_configured` without `IUserStore`; user not found → generic 401. It is the piece that lets a passwordless-first client show "your account has no password" and offer `/create-password`.
 
 **F5 (v3.2.0) — opt-in recovery codes** (dedicated mapper
 `MapSecureAuthRecoveryCodesEndpoints(prefix = "/auth/recovery-codes")`; requires `AddMfa()`;

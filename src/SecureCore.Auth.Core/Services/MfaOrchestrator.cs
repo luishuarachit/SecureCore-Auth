@@ -287,12 +287,12 @@ public sealed class MfaOrchestrator : IMfaService
 
         await _userStore.UpdateMfaEnrollmentAsync(userId, MfaEnrollmentStatus.Enrolled, method, cancellationToken);
 
-        if (_options.EnableRecoveryCodes)
-        {
-            var recoveryCodes = _totpService.GenerateRecoveryCodes(_options.RecoveryCodeCount);
-            var hashes = recoveryCodes.Select(rc => ComputeHash(rc)).ToList();
-            await _userStore.SetRecoveryCodesAsync(userId, hashes, cancellationToken);
-        }
+        // DIDÁCTICA (auditoría F5): el enrollment legacy YA NO genera recovery codes aquí. El
+        // bloque anterior escribía hashes en IUserStore.SetRecoveryCodesAsync que NADIE redimía
+        // (A-18) y descartaba el texto plano (el método retorna bool, el usuario jamás veía los
+        // códigos): funcionalidad rota + orfanato. La solución real es
+        // RecoveryCodeOrchestrator.GenerateAsync (F5), que SÍ devuelve el plaintext una sola vez
+        // y persiste solo hashes con su propio store de redención.
 
         _logger.LogInformation("Enrollment MFA completado para usuario {UserId}, método: {Method}", userId, method);
 

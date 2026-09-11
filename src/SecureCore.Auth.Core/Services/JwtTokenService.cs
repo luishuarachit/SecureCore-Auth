@@ -214,7 +214,7 @@ public sealed class JwtTokenService(
     /// DIDÁCTICA: Esta método implementa la estrategia de firma según el algoritmo:
     ///
     /// - HS256 (simétrico): Usa SigningKey. La MISMA clave firma y valida.
-    ///   Riesgo: Si la clave se filtra, cualquiera puede伪造 tokens.
+    ///   Riesgo: Si la clave se filtra, cualquiera puede falsificar tokens.
     ///
     /// - RS256/ES256 (asimétrico): Usa PrivateKey para firmar, PublicKey para validar.
     ///   La clave privada permanece en el servidor; la pública se distribuye.

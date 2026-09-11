@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text.Json;
 using Fido2NetLib;
 using Microsoft.Extensions.Logging;
@@ -347,8 +348,14 @@ public sealed class WebAuthnOrchestrator(
         // A-29: se CLONA el diccionario antes de mutar. user.Claims puede ser una instancia
         // compartida/cacheada del store; mutarla en sitio contaminaría tokens de otros flujos
         // con un amr que no les corresponde.
+        // DIDÁCTICA (S6, A-25 / RFC 8176): con EmitAmr se añade mfa_method=webauthn (paridad con
+        // los flujos MFA que emiten amr=mfa + mfa_method). Opt-in: sin la opción, el token no cambia.
         var customClaims = new Dictionary<string, string>(user.Claims ?? []);
         customClaims["amr"] = "webauthn";
+        if (_secureAuthOptions.EmitAmr)
+        {
+            customClaims["mfa_method"] = "webauthn";
+        }
         var userWithClaims = user with { Claims = customClaims };
 
         var tokens = await tokenService.GenerateTokenPairAsync(userWithClaims, cancellationToken);
@@ -359,7 +366,9 @@ public sealed class WebAuthnOrchestrator(
             TokenHash = tokenHash,
             FamilyId = Guid.NewGuid().ToString(),
             UserId = user.Id,
-            ExpiresAtUtc = DateTime.UtcNow.Add(_secureAuthOptions.RefreshTokenLifetime)
+            ExpiresAtUtc = DateTime.UtcNow.Add(_secureAuthOptions.RefreshTokenLifetime),
+            AuthMethod = "webauthn",
+            MfaMethod = _secureAuthOptions.EmitAmr ? "webauthn" : null
         };
 
         await sessionStore.CreateAsync(refreshEntry, cancellationToken);
@@ -415,7 +424,9 @@ public sealed class WebAuthnOrchestrator(
         CancellationToken cancellationToken)
     {
         var ttl = TimeSpan.FromSeconds(_webAuthnOptions.ChallengeTimeoutSeconds);
-        var rawId = Guid.NewGuid().ToString("N");
+        // DIDÁCTICA (auditoría): challengeId con CSPRNG (RandomNumberGenerator), no Guid.NewGuid()
+        // (que no es una fuente criptográfica documentada). Actúa como capability token.
+        var rawId = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
         await challengeStore.CreateAsync(ChallengeKey(tag, rawId), payload, ttl, cancellationToken);
 
         logger.LogDebug("Challenge de {Tag} creado. Id: {ChallengeId}, TTL: {Ttl}s",

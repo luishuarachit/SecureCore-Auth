@@ -104,13 +104,6 @@ public static class SecureAuthEndpoints
                     statusCode: StatusCodes.Status429TooManyRequests);
             }
 
-            if (result.RequiresTwoFactor)
-            {
-                return Results.Json(
-                    new { error = "two_factor_required", message = "Se requiere segundo factor." },
-                    statusCode: StatusCodes.Status200OK);
-            }
-
             // Respuesta genérica para evitar enumeración de usuarios
             return Results.Json(
                 new { error = "invalid_credentials", message = result.Message },
@@ -120,6 +113,52 @@ public static class SecureAuthEndpoints
         .WithName("Login")
         .WithDescription("Inicia sesión con email y contraseña.")
         .AllowAnonymous();
+
+        // ─────────────────────────────────────────────────────────
+        //  GET /auth/me (F6, A-25 — perfil del usuario autenticado)
+        // ─────────────────────────────────────────────────────────
+        // DIDÁCTICA (S6): expone de forma FRESCA (leído del store en cada llamada) el estado de
+        // credenciales del usuario autenticado. hasPassword NO va en claims: un token emitido
+        // antes de crear la contraseña mentiría tras el cambio; este endpoint lo lee al momento.
+        // Es AUTENTICADO (solo la cuenta del token, sin riesgo de enumeración).
+        group.MapGet("/me", async (
+            HttpContext httpContext,
+            IServiceProvider serviceProvider,
+            CancellationToken ct) =>
+        {
+            var userStore = serviceProvider.GetService<IUserStore>();
+            if (userStore is null)
+            {
+                return Results.Json(
+                    new { error = "me_not_configured", message = "El perfil de usuario no está configurado." },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            var userId = httpContext.User.FindFirst("sub")?.Value
+                         ?? httpContext.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+            if (userId is null)
+            {
+                return Results.Unauthorized();
+            }
+
+            var user = await userStore.FindByIdAsync(userId, ct);
+            if (user is null)
+            {
+                // DIDÁCTICA: usuario no encontrado → 401 genérico (sin oráculo).
+                return Results.Unauthorized();
+            }
+
+            return Results.Ok(new MeResponse(
+                user.Id,
+                user.Email,
+                user.PasswordHash is not null,
+                user.TwoFactorEnabled,
+                user.MfaEnrollmentStatus,
+                user.PreferredMfaMethod));
+        })
+        .WithName("Me")
+        .WithDescription("Perfil del usuario autenticado: hasPassword y estado MFA (F6, A-25).")
+        .RequireAuthorization();
 
         // ─────────────────────────────────────────────────────────
         //  POST /auth/refresh
@@ -827,3 +866,25 @@ public record RecoveryCodeRedemptionRequest(
     [property: Required(ErrorMessage = "El código de recuperación es requerido.")]
     [property: MaxLength(128, ErrorMessage = "El código no puede superar 128 caracteres.")]
     string Code);
+
+/// <summary>
+/// Respuesta del perfil del usuario autenticado (F6, A-25).
+/// </summary>
+/// <remarks>
+/// DIDÁCTICA: es un endpoint AUTENTICADO (solo la cuenta del token). <c>HasPassword</c> se lee
+/// del store en cada llamada (nunca de un claim, que mentiría tras crear la contraseña). No
+/// expone datos sensibles: es la propia cuenta del usuario consultando su estado.
+/// </remarks>
+/// <param name="Id">Identificador del usuario (claim sub).</param>
+/// <param name="Email">Email del usuario.</param>
+/// <param name="HasPassword">true si la cuenta tiene contraseña registrada (nullable de primera clase).</param>
+/// <param name="TwoFactorEnabled">true si la cuenta tiene 2FA habilitado.</param>
+/// <param name="MfaEnrollmentStatus">Estado del enrollment MFA.</param>
+/// <param name="PreferredMfaMethod">Método MFA preferido (totp/email), si existe.</param>
+public record MeResponse(
+    string Id,
+    string? Email,
+    bool HasPassword,
+    bool TwoFactorEnabled,
+    MfaEnrollmentStatus MfaEnrollmentStatus,
+    string? PreferredMfaMethod);

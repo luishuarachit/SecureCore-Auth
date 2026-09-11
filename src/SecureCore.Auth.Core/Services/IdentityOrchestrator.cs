@@ -61,16 +61,28 @@ public sealed class IdentityOrchestrator(
     /// Intenta autenticar un usuario con email y contraseña.
     /// </summary>
     /// <param name="email">Email del usuario.</param>
-    /// <param name="password">Contraseña en texto plano.</param>
+    /// <param name="password">
+    /// Contraseña en texto plano. <c>null</c> significa "login sin credencial" (passwordless):
+    /// se devuelve <see cref="SignInResult.PasswordlessRequiresCredential"/> sin consultar el store.
+    /// </param>
     /// <param name="cancellationToken">Token de cancelación.</param>
     /// <returns>Tupla con el resultado del login, los tokens (si fue exitoso), y token MFA (si requiere MFA).</returns>
     public async Task<(SignInResult Result, TokenResponse? Tokens, string? MfaSessionToken)> SignInWithPasswordAsync(
         string email,
-        string password,
+        string? password,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(email);
-        ArgumentNullException.ThrowIfNull(password);
+
+        // DIDÁCTICA (S6, A-25): sin credencial → señal a nivel de REQUEST, uniforme para todos los
+        // emails. Se devuelve ANTES de tocar el store: no distinguimos "email existe y es
+        // passwordless" de "email no existe" (eso sería un oráculo de enumeración). VerifyDummyPassword
+        // solo aplica con password no nulo (no hay nada que hashear).
+        if (password is null)
+        {
+            logger.LogDebug("Login sin credencial: se requiere una (contraseña o passkey)");
+            return (SignInResult.PasswordlessRequiresCredential, null, null);
+        }
 
         var user = await userStore.FindByEmailAsync(email.ToLowerInvariant(), cancellationToken);
 
@@ -213,7 +225,18 @@ public sealed class IdentityOrchestrator(
             await _accountProtection!.RecordSuccessAsync(AccountProtectionScope.Password, user.Id, cancellationToken);
         }
 
-        var tokens = await tokenService.GenerateTokenPairAsync(user, cancellationToken);
+        // DIDÁCTICA (S6, A-25 / RFC 8176): con EmitAmr el login por contraseña expresa el método
+        // de autenticación (amr=pwd) de forma consistente con MFA (amr=mfa) y WebAuthn
+        // (amr=webauthn). Opt-in: con EmitAmr=false el token no cambia (no-breaking).
+        var userWithClaims = user;
+        if (_options.EmitAmr)
+        {
+            var customClaims = new Dictionary<string, string>(user.Claims ?? []);
+            customClaims["amr"] = "pwd";
+            userWithClaims = user with { Claims = customClaims };
+        }
+
+        var tokens = await tokenService.GenerateTokenPairAsync(userWithClaims, cancellationToken);
 
         var tokenHash = tokenService.HashRefreshToken(tokens.RefreshToken);
         var refreshEntry = new RefreshTokenEntry
@@ -221,7 +244,8 @@ public sealed class IdentityOrchestrator(
             TokenHash = tokenHash,
             FamilyId = Guid.NewGuid().ToString(),
             UserId = user.Id,
-            ExpiresAtUtc = DateTime.UtcNow.Add(_options.RefreshTokenLifetime)
+            ExpiresAtUtc = DateTime.UtcNow.Add(_options.RefreshTokenLifetime),
+            AuthMethod = _options.EmitAmr ? "pwd" : null
         };
 
         await sessionStore.CreateAsync(refreshEntry, cancellationToken);
@@ -230,7 +254,8 @@ public sealed class IdentityOrchestrator(
         await eventDispatcher.DispatchAsync(new AuthEvent
         {
             EventType = AuthEventType.LoginSuccess,
-            UserId = user.Id
+            UserId = user.Id,
+            Metadata = new Dictionary<string, string> { ["method"] = "password" }
         }, cancellationToken);
 
         return (SignInResult.Success, tokens, null);
@@ -298,7 +323,11 @@ public sealed class IdentityOrchestrator(
             TokenHash = tokenHash,
             FamilyId = Guid.NewGuid().ToString(),
             UserId = user.Id,
-            ExpiresAtUtc = DateTime.UtcNow.Add(_options.RefreshTokenLifetime)
+            ExpiresAtUtc = DateTime.UtcNow.Add(_options.RefreshTokenLifetime),
+            AuthMethod = "mfa",
+            MfaMethod = mfaResult.VerifiedMethod.HasValue
+                ? mfaResult.VerifiedMethod.Value.ToString().ToLowerInvariant()
+                : null
         };
 
         await sessionStore.CreateAsync(refreshEntry, cancellationToken);
@@ -417,7 +446,9 @@ public sealed class IdentityOrchestrator(
             TokenHash = tokenHash,
             FamilyId = Guid.NewGuid().ToString(),
             UserId = user.Id,
-            ExpiresAtUtc = DateTime.UtcNow.Add(_options.RefreshTokenLifetime)
+            ExpiresAtUtc = DateTime.UtcNow.Add(_options.RefreshTokenLifetime),
+            AuthMethod = "mfa",
+            MfaMethod = "recovery"
         };
         await sessionStore.CreateAsync(refreshEntry, cancellationToken);
 

@@ -170,6 +170,108 @@ public class SessionOrchestratorTests
     }
 
     [Fact]
+    public async Task RotateRefreshTokenAsync_ReplacedWithinGracePeriod_ReturnsAccessToken_WithoutRevokingFamily()
+    {
+        // DIDÁCTICA (auditoría): el grace period DEBE ser alcanzable. Un token rotado (marcado
+        // ReplacedBy + ReplacedAtUtc reciente) presentado de nuevo por una race condition del
+        // cliente NO debe revocar la familia: devuelve un Access Token fresco e idempotente.
+        var entry = new RefreshTokenEntry
+        {
+            TokenHash = "old-hash",
+            FamilyId = "family-1",
+            UserId = "u1",
+            IsRevoked = true, // un store real marca el token rotado también como revocado
+            ReplacedByTokenHash = "new-hash",
+            ReplacedAtUtc = DateTime.UtcNow, // dentro del grace period (30 s)
+            ExpiresAtUtc = DateTime.UtcNow.AddDays(7)
+        };
+
+        _tokenService.HashRefreshToken("old-token").Returns("old-hash");
+        _sessionStore.FindByTokenHashAsync("old-hash")
+            .Returns(ValueTask.FromResult<RefreshTokenEntry?>(entry));
+        _userStore.FindByIdAsync("u1")
+            .Returns(ValueTask.FromResult<UserIdentity?>(new UserIdentity { Id = "u1", Email = "t@e.com", SecurityStamp = "s" }));
+        _tokenService.GenerateAccessToken(Arg.Any<UserIdentity>()).Returns("fresh-jwt");
+
+        var result = await _orchestrator.RotateRefreshTokenAsync("old-token");
+
+        Assert.NotNull(result);
+        Assert.Equal("fresh-jwt", result.AccessToken);
+        Assert.Equal("old-token", result.RefreshToken);
+        await _sessionStore.DidNotReceiveWithAnyArgs().RevokeByFamilyAsync(Arg.Any<string>(), Arg.Any<CancellationToken>());
+        await _sessionStore.DidNotReceiveWithAnyArgs().CreateAsync(Arg.Any<RefreshTokenEntry>(), Arg.Any<CancellationToken>());
+        await _eventDispatcher.DidNotReceiveWithAnyArgs().DispatchAsync(Arg.Any<AuthEvent>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task RotateRefreshTokenAsync_ReplacedOutsideGracePeriod_RevokesFamily()
+    {
+        // Fuera del grace period, la re-presentación de un token rotado es REUSO → familia revocada.
+        var entry = new RefreshTokenEntry
+        {
+            TokenHash = "old-hash",
+            FamilyId = "family-1",
+            UserId = "u1",
+            ReplacedByTokenHash = "new-hash",
+            ReplacedAtUtc = DateTime.UtcNow.AddSeconds(-60), // fuera del grace (30 s)
+            ExpiresAtUtc = DateTime.UtcNow.AddDays(7)
+        };
+
+        _tokenService.HashRefreshToken("old-token").Returns("old-hash");
+        _sessionStore.FindByTokenHashAsync("old-hash")
+            .Returns(ValueTask.FromResult<RefreshTokenEntry?>(entry));
+
+        var result = await _orchestrator.RotateRefreshTokenAsync("old-token");
+
+        Assert.Null(result);
+        await _sessionStore.Received(1).RevokeByFamilyAsync("family-1", Arg.Any<CancellationToken>());
+        await _eventDispatcher.Received(1).DispatchAsync(
+            Arg.Is<AuthEvent>(e => e.EventType == AuthEventType.SuspiciousActivityDetected),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task RotateRefreshTokenAsync_ValidToken_PreservesAuthMethodInNewTokens()
+    {
+        // DIDÁCTICA (auditoría): el aseguramiento de la sesión (amr/mfa_method) debe sobrevivir
+        // a la rotación; sin esto, una sesión MFA se re-emite sin amr (downgrade).
+        var entry = new RefreshTokenEntry
+        {
+            TokenHash = "old-hash",
+            FamilyId = "family-1",
+            UserId = "u1",
+            AuthMethod = "mfa",
+            MfaMethod = "totp",
+            ExpiresAtUtc = DateTime.UtcNow.AddDays(7)
+        };
+
+        var user = new UserIdentity { Id = "u1", Email = "t@e.com", SecurityStamp = "stamp" };
+
+        _tokenService.HashRefreshToken("old-token").Returns("old-hash");
+        _tokenService.HashRefreshToken("new-refresh").Returns("new-hash");
+        _sessionStore.FindByTokenHashAsync("old-hash")
+            .Returns(ValueTask.FromResult<RefreshTokenEntry?>(entry));
+        _userStore.FindByIdAsync("u1")
+            .Returns(ValueTask.FromResult<UserIdentity?>(user));
+        _tokenService.GenerateTokenPairAsync(Arg.Any<UserIdentity>())
+            .Returns(Task.FromResult(new TokenResponse("new-jwt", "new-refresh", DateTimeOffset.UtcNow.AddMinutes(15))));
+
+        var result = await _orchestrator.RotateRefreshTokenAsync("old-token");
+
+        Assert.NotNull(result);
+        await _tokenService.Received(1).GenerateTokenPairAsync(
+            Arg.Is<UserIdentity>(u =>
+                u.Claims != null &&
+                u.Claims.GetValueOrDefault("amr") == "mfa" &&
+                u.Claims.GetValueOrDefault("mfa_method") == "totp"),
+            Arg.Any<CancellationToken>());
+        await _sessionStore.Received(1).CreateAsync(
+            Arg.Is<RefreshTokenEntry>(e =>
+                e.AuthMethod == "mfa" && e.MfaMethod == "totp"),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
     public async Task RevokeAllSessionsAsync_RevokesTokensAndChangesStamp()
     {
         // Act

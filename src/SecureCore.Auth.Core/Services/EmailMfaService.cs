@@ -42,10 +42,10 @@ public sealed class EmailMfaService : IEmailMfaService
 
     public string GenerateCode(int length = 6)
     {
+        // DIDÁCTICA (auditoría): RandomNumberGenerator.GetInt32 evita el modulo bias de
+        // "uint % maxValue" (los valores bajos quedaban sobrerrepresentados) y es uniforme.
         var maxValue = (int)Math.Pow(10, length);
-        var bytes = new byte[4];
-        RandomNumberGenerator.Fill(bytes);
-        var value = BitConverter.ToUInt32(bytes, 0) % maxValue;
+        var value = RandomNumberGenerator.GetInt32(0, maxValue);
         return value.ToString().PadLeft(length, '0');
     }
 

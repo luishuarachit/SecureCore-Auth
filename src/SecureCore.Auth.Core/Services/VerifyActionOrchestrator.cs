@@ -237,9 +237,13 @@ public sealed class VerifyActionOrchestrator(
     {
         var window = TimeSpan.FromMinutes(_verifyActionOptions.TtlMinutes);
         var maxSends = _verifyActionOptions.MaxSendsPerWindow;
+
+        // DIDÁCTICA (auditoría): FAIL-CLOSED. Un host que construya opciones sin validación
+        // ([Range]) con window<=0 o maxSends<=0 NO debe desactivar silenciosamente el throttle
+        // duro de envíos (anti email-flood): ante configuración inválida se deniega el envío.
         if (window <= TimeSpan.Zero || maxSends <= 0)
         {
-            return true;
+            return false;
         }
 
         var queue = _sendThrottles.GetOrAdd(userId, static _ => new Queue<DateTimeOffset>());

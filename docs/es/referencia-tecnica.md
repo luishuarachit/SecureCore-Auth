@@ -55,6 +55,7 @@ Define parámetros del ciclo de vida de la sesión y políticas de bloqueo.
 | `MfaVerifiedTtl` (v3.2.0, S3) | `TimeSpan` | 8 h | Ventana "mfa_verified"; ≤ 0 → fallback 8 h (ver §4.9) |
 | `EmitAcr` (v3.2.0, S3) | `bool` | false | Emite claim `acr` en todos los tokens (opt-in) |
 | `AcrLevel` (v3.2.0, S3) | `string` | "1" | Valor del claim `acr` cuando `EmitAcr` está activo |
+| `EmitAmr` (v3.2.0, F6) | `bool` | false | Emite `amr` de forma consistente (RFC 8176): password→`pwd`, WebAuthn añade `mfa_method=webauthn` (opt-in) |
 
 #### Per-Role Access Token Lifetime (v3.1.5)
 
@@ -282,8 +283,11 @@ el default se registra con `TryAddScoped`: implementa tu propia versión distrib
 ### 4.1. IdentityOrchestrator
 Coordina el flujo de autenticación. No contiene lógica criptográfica pero orquesta cada paso.
 
-- **`SignInWithPasswordAsync(email, password)`**: Ejecuta búsqueda, validación de bloqueo, hashing de tiempo constante y generación de tokens.
+- **`SignInWithPasswordAsync(email, string? password)`** (F6, A-25): Ejecuta búsqueda, validación de bloqueo, hashing de tiempo constante y generación de tokens.
   - Implementa `VerifyDummyPassword` para mitigar ataques de tiempo si el usuario no existe.
+  - **Password nullable de primera clase**: `password == null` → `SignInResult.PasswordlessRequiresCredential` **sin consultar el store** (señal a nivel de REQUEST, uniforme para todos los emails → sin oráculo de enumeración). `VerifyDummyPassword` solo se ejecuta con password no nulo.
+  - `SignInResult` expone `ErrorCode` tipado (`SignInErrorCode`) para que el host decida su UX programáticamente: `InvalidCredentials`, `AccountLockedOut`, `TwoFactorRequired`, `TwoFactorRegistrationRequired`, `PasswordlessRequiresCredential`, `GenericFailure`. **Regla de seguridad**: no exponer `ErrorCode` a clientes no autenticados (distinguir códigos sería un oráculo de enumeración); el framework mantiene respuestas HTTP uniformes.
+  - El camino de éxito emite `LoginSuccess` con metadata `method=password` y, con `EmitAmr` activo, el claim `amr=pwd` (RFC 8176).
 - **`SignInExternalAsync(provider, providerKey)`**: Procesa el login para usuarios autenticados vía OAuth (Google, GitHub, etc.). Vincula la identidad externa con una sesión local.
 - **`CompleteMfaLoginWithRecoveryCodeAsync(mfaSessionToken, recoveryCode, rotateSecurityStamp, ct)`** (v3.2.0, A1 auditoría F5): completa el login con un recovery code ya redimido. A diferencia de `CompleteMfaLoginAsync` (que exige un `mfaCode` TOTP/email), este flujo redime el recovery code (single-use vía `RecoveryCodeOrchestrator.UseAsync`), consume el token de sesión, emite tokens con `amr=mfa`/`mfa_method=recovery` y abre la ventana `mfa_verified` (paridad S3). El flag `rotateSecurityStamp` (política del host) rota el SecurityStamp, invalida su caché y revoca **todas** las sesiones previas (recomendado tras pérdida/robo del dispositivo MFA); con `false`, la sesión y el stamp actuales se conservan. El bloqueo S1 (scope `Recovery`) se traduce a fallo genérico de login (sin revelar la causa). Requiere `AddMfa()` (sin `RecoveryCodeOrchestrator` registrado devuelve `Failed`).
 
@@ -547,11 +551,14 @@ services.AddSecureAuth(options => { ... })
 
 **S3 (v3.2.0) — endpoints opt-in** (requieren unos y autenticación Bearer; el `userId` proviene del
 claim `sub`; respuestas con mensajes genéricos; 503 si el orquestador no está registrado):
-
 - `POST /verify-action/send`: sin cuerpo — envía OTP de step-up (usuario por claim `sub`; canal fijo email en esta versión).
 - `POST /verify-action/verify`: `{ code }` — consume el OTP y abre la ventana.
 - `POST /create-password`: `{ newPassword }` — crea contraseña (requiere ventana de step-up abierta; sin `otp` en el cuerpo).
 - `POST /change-password`: `{ currentPassword, newPassword }` — cambia contraseña (sin step-up).
+
+**F6 (v3.2.0) — perfil autenticado**:
+
+- `GET /me` — perfil del usuario autenticado (Bearer): `{ id, email, hasPassword, twoFactorEnabled, mfaEnrollmentStatus, preferredMfaMethod }`. `hasPassword` se lee del store en cada llamada (nunca de un claim, que mentiría tras crear la contraseña). 503 `me_not_configured` sin `IUserStore`; usuario no encontrado → 401 genérico. Es la pieza que permite a un cliente passwordless-first mostrar "tu cuenta no tiene contraseña" y ofrecer `/create-password`.
 
 **F5 (v3.2.0) — recovery codes opt-in** (mapper dedicado `MapSecureAuthRecoveryCodesEndpoints(prefix = "/auth/recovery-codes")`;
 requiere `AddMfa()`; respuestas genéricas y anti-enumeración; 503 si el orquestador no está registrado):

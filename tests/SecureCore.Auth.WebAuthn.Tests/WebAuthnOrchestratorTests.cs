@@ -53,7 +53,8 @@ public class WebAuthnOrchestratorTests
         bool enableProtection = false,
         bool openMfaWindow = true,
         string[]? origins = null,
-        bool discloseCredentials = false)
+        bool discloseCredentials = false,
+        bool emitAmr = false)
     {
         _webAuthnOptions.Origins = origins is null ? [AllowedOrigin] : [.. origins];
         _webAuthnOptions.OpenMfaVerifiedWindowOnPasskeyLogin = openMfaWindow;
@@ -75,7 +76,7 @@ public class WebAuthnOrchestratorTests
             _sessionStore,
             _eventDispatcher,
             Options.Create(_webAuthnOptions),
-            Options.Create(new SecureAuthOptions()),
+            Options.Create(new SecureAuthOptions { EmitAmr = emitAmr }),
             NullLogger<WebAuthnOrchestrator>.Instance,
             enableProtection ? _protection : null,
             enableProtection ? Options.Create(new AccountProtectionOptions { Enabled = true }) : null,
@@ -490,6 +491,45 @@ public class WebAuthnOrchestratorTests
 
         Assert.True(result.Success);
         Assert.False(sourceClaims.ContainsKey("amr"), "El diccionario de claims del store no debe mutar");
+    }
+
+    [Fact]
+    public async Task CompleteLogin_Success_WithEmitAmr_AddsMfaMethodClaim()
+    {
+        // DIDÁCTICA (S6, A-25 / RFC 8176): con EmitAmr el login WebAuthn emite además
+        // mfa_method=webauthn (paridad con los flujos MFA que emiten amr=mfa + mfa_method).
+        var sut = CreateOrchestrator(openMfaWindow: true, emitAmr: true);
+        StubSuccessfulAssertion();
+
+        UserIdentity? capturedIdentity = null;
+        _tokenService.GenerateTokenPairAsync(Arg.Do<UserIdentity>(u => capturedIdentity = u), Arg.Any<CancellationToken>())
+            .Returns(new TokenResponse("at", "rt", DateTimeOffset.UtcNow.AddHours(1)));
+        _tokenService.HashRefreshToken(Arg.Any<string>()).Returns("token-hash");
+
+        var result = await sut.CompleteLoginAsync(AllowedOrigin, "ch1", NewAssertionResponse());
+
+        Assert.True(result.Success);
+        Assert.Equal("webauthn", capturedIdentity!.Claims!["amr"]);
+        Assert.Equal("webauthn", capturedIdentity!.Claims!["mfa_method"]);
+    }
+
+    [Fact]
+    public async Task CompleteLogin_Success_WithoutEmitAmr_NoMfaMethodClaim()
+    {
+        // DIDÁCTICA (D6-05): sin EmitAmr el token no cambia (no-breaking).
+        var sut = CreateOrchestrator(openMfaWindow: true, emitAmr: false);
+        StubSuccessfulAssertion();
+
+        UserIdentity? capturedIdentity = null;
+        _tokenService.GenerateTokenPairAsync(Arg.Do<UserIdentity>(u => capturedIdentity = u), Arg.Any<CancellationToken>())
+            .Returns(new TokenResponse("at", "rt", DateTimeOffset.UtcNow.AddHours(1)));
+        _tokenService.HashRefreshToken(Arg.Any<string>()).Returns("token-hash");
+
+        var result = await sut.CompleteLoginAsync(AllowedOrigin, "ch1", NewAssertionResponse());
+
+        Assert.True(result.Success);
+        Assert.Equal("webauthn", capturedIdentity!.Claims!["amr"]);
+        Assert.False(capturedIdentity!.Claims!.ContainsKey("mfa_method"));
     }
 
     [Fact]

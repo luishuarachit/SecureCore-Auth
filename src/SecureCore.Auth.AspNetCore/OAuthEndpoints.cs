@@ -50,9 +50,13 @@ public static class OAuthEndpoints
             }
 
             if (result.IsLockedOut)
-                return Results.Json(new { error = "account_locked", message = result.ErrorMessage }, statusCode: StatusCodes.Status429TooManyRequests);
+                return Results.Json(new { error = "account_locked", message = "La cuenta está temporalmente bloqueada. Intente más tarde." }, statusCode: StatusCodes.Status429TooManyRequests);
 
-            return Results.Json(new { error = "oauth_failed", message = result.ErrorMessage }, statusCode: StatusCodes.Status401Unauthorized);
+            // DIDÁCTICA (auditoría): mensaje GENÉRICO. El ErrorMessage del resultado puede
+            // contener detalles internos del proveedor o del sistema (ex.Message) y distinguir
+            // "cuenta no existe" (oráculo de enumeración). Nunca se reenvía al cliente anónimo;
+            // el host usa el ErrorCode tipado para su diagnóstico.
+            return Results.Json(new { error = "oauth_failed", message = "La autenticación con el proveedor falló." }, statusCode: StatusCodes.Status401Unauthorized);
         })
         .WithName("OAuthToken")
         .WithDescription("Inicia sesión usando un token emitido por el proveedor al frontend (Flujo B).")
@@ -154,9 +158,11 @@ public static class OAuthEndpoints
             }
 
             if (result.IsLockedOut)
-                return Results.Json(new { error = "account_locked", message = result.ErrorMessage }, statusCode: StatusCodes.Status429TooManyRequests);
+                return Results.Json(new { error = "account_locked", message = "La cuenta está temporalmente bloqueada. Intente más tarde." }, statusCode: StatusCodes.Status429TooManyRequests);
 
-            return Results.Json(new { error = "oauth_failed", message = result.ErrorMessage }, statusCode: StatusCodes.Status401Unauthorized);
+            // DIDÁCTICA (auditoría): mensaje GENÉRICO (anti-enumeración y anti-fuga de detalles
+            // internos del proveedor); el host diagnostica con el ErrorCode tipado.
+            return Results.Json(new { error = "oauth_failed", message = "La autenticación con el proveedor falló." }, statusCode: StatusCodes.Status401Unauthorized);
         })
         .WithName("OAuthCallback")
         .WithDescription("Recibe el código de autorización del proveedor y emite los tokens.")

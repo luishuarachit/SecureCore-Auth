@@ -1049,6 +1049,57 @@ distinguish "nonexistent code" from "already used" or "locked account" (anti-enu
 
 ---
 
+### Use Case 12: Passwordless-first (sign in without a password) — v3.2.0, F6 (A-25)
+
+**Scenario**: you want your users to be able to sign in **without a password** (passkeys) as a
+product stance, keeping the password as an option. The library supports this incrementally and
+non-breaking.
+
+**Setup** (everything is opt-in):
+
+```csharp
+builder.Services.AddSecureAuth(options =>
+{
+    // ...
+    options.Auth.EmitAmr = true; // RFC 8176: amr=pwd on password, mfa_method=webauthn on passkey
+})
+.AddPasswordAuthentication()
+.AddWebAuthn(webauthn => { /* ... */ });
+```
+
+**1 — The passwordless user signs in with their passkey**. The WebAuthn ceremony
+(`/auth/webauthn/login/begin` + `/complete`) works with accounts **without** a password
+(first-class nullable `PasswordHash`): the token is issued with `amr=webauthn`.
+
+**2 — The client fetches the authenticated profile** (`GET /auth/me`) to learn the account state
+(for example, in settings, to offer "add a password"):
+
+```http
+GET /auth/me
+Authorization: Bearer ...
+// 200 → { "id": "u1", "email": "user@example.com", "hasPassword": false,
+//         "twoFactorEnabled": true, "mfaEnrollmentStatus": "Enrolled",
+//         "preferredMfaMethod": "totp" }
+```
+
+> `hasPassword` is read **fresh** from the store on every call (never from a claim: a token issued
+> before creating the password would lie after the change).
+
+**3 — The user adds a password** with the existing `/verify-action/send` +
+`/verify-action/verify` + `/create-password` flow (requires step-up; NIST SP 800-63B).
+
+**4 — Programmatic orchestration (host)**: `SignInWithPasswordAsync(email, null)` returns
+`SignInResult.PasswordlessRequiresCredential` (with a typed `ErrorCode`) for the host to drive its
+UX, **without** touching the store or revealing whether the account is passwordless (uniform
+request-level signal, no enumeration oracle).
+
+> **DIDACTIC — anti-enumeration**: the `/login` endpoint requires `password` (`[Required]`); the
+> `PasswordlessRequiresCredential` state is a **request-level** signal (same response for existing
+> or non-existing emails). The `SignInResult.ErrorCode` is for the **host**; do not expose it to
+> unauthenticated clients. `hasPassword` is only queried via `/auth/me` (authenticated).
+
+---
+
 ## Advanced Features
 
 ### Passkeys / WebAuthn
@@ -1332,6 +1383,9 @@ builder.Services.AddSecureAuth(options =>
     // ═══ Per-IP rate limiting for /recovery-codes/verify and /use (B1, audit) ═══
     // options.Auth.RecoveryVerifyRateLimiter = new() { MaxAttempts = 10, Window = TimeSpan.FromMinutes(1) };
     // options.Auth.RecoveryUseRateLimiter = new() { MaxAttempts = 5, Window = TimeSpan.FromMinutes(1) };
+
+    // ═══ Authentication method claims (F6, RFC 8176) ═══
+    // options.Auth.EmitAmr = true; // amr=pwd on password; mfa_method=webauthn on passkey
 
     // Issuer for TOTP QR code
     options.Auth.Mfa.TotpIssuer = "MyApp";

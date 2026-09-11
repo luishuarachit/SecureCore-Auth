@@ -422,6 +422,26 @@ public class SecureAuthOptions
     /// Valor del claim "acr" emitido cuando <see cref="EmitAcr"/> está activo. Por defecto: "1".
     /// </summary>
     public string AcrLevel { get; set; } = "1";
+
+    /// <summary>
+    /// Emite el claim "amr" (Authentication Methods References, RFC 8176) de forma consistente en
+    /// todos los métodos de login (F6, A-25). Por defecto: false (opt-in, D-03).
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA (RFC 8176): <c>amr</c> describe CÓMO se autenticó el sujeto. Hoy la librería ya lo
+    /// emite en los flujos MFA (<c>amr=mfa</c> + <c>mfa_method</c>) y WebAuthn (<c>amr=webauthn</c>),
+    /// pero el login por contraseña NO. Al activar esta opción:
+    /// <list type="bullet">
+    /// <item><description>Login por contraseña → <c>amr=pwd</c>.</description></item>
+    /// <item><description>Login WebAuthn → además <c>mfa_method=webauthn</c>.</description></item>
+    /// <item><description>MFA → ya emite <c>amr=mfa</c> + <c>mfa_method</c>.</description></item>
+    /// </list>
+    /// Con <c>false</c> el comportamiento actual se conserva intacto (opt-in, no-breaking): añadir
+    /// un claim nuevo al JWT podría romper consumidores con validación estricta de claims, por eso
+    /// no es el default. <c>amr</c> sigue protegido en el blocklist de system claims
+    /// (solo los orquestadores lo inyectan).
+    /// </remarks>
+    public bool EmitAmr { get; set; } = false;
 }
 
 /// <summary>

@@ -55,6 +55,23 @@ public record RefreshTokenEntry
     public DateTime? ReplacedAtUtc { get; init; }
 
     /// <summary>
+    /// Método de autenticación con el que se creó la sesión (valor del claim "amr", RFC 8176).
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA (auditoría): el claim <c>amr</c> describe CÓMO se autenticó el sujeto y debe
+    /// sobrevivir a la rotación del refresh token: sin esto, una sesión iniciada con MFA o
+    /// passkey se re-emite tras el primer refresh SIN <c>amr</c>, degradando el aseguramiento
+    /// que un resource server autoriza por ese claim. Se persiste en la sesión y se propaga en
+    /// cada rotación.
+    /// </remarks>
+    public string? AuthMethod { get; init; }
+
+    /// <summary>
+    /// Detalle del método MFA (valor del claim "mfa_method") con el que se creó la sesión.
+    /// </summary>
+    public string? MfaMethod { get; init; }
+
+    /// <summary>
     /// Verifica si el token ha expirado.
     /// </summary>
     public bool IsExpired => DateTime.UtcNow >= ExpiresAtUtc;

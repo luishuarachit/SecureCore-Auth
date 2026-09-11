@@ -1,5 +1,7 @@
 using System.IdentityModel.Tokens.Jwt;
 using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace SecureCore.Auth.OAuth;
 
@@ -33,5 +35,26 @@ public static class OAuthClaimHelper
     public static string? GetClaim(JwtSecurityToken jwt, string claimType)
     {
         return jwt.Claims.FirstOrDefault(c => c.Type == claimType)?.Value;
+    }
+
+    /// <summary>
+    /// Compara dos valores (nonce, state) en TIEMPO CONSTANTE.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA (auditoría): comparar el nonce con <c>==</c> permite a un atacante medir por
+    /// timing cuántos caracteres acertó. FixedTimeEquals mantiene el tiempo independiente del
+    /// contenido; la longitud se compara primero (para valores de longitud fija, como nonces
+    /// CSPRNG, no revela información útil).
+    /// </remarks>
+    public static bool FixedTimeEquals(string? a, string? b)
+    {
+        if (a is null || b is null)
+        {
+            return false;
+        }
+
+        var bytesA = Encoding.UTF8.GetBytes(a);
+        var bytesB = Encoding.UTF8.GetBytes(b);
+        return bytesA.Length == bytesB.Length && CryptographicOperations.FixedTimeEquals(bytesA, bytesB);
     }
 }

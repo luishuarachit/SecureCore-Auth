@@ -17,8 +17,10 @@ namespace SecureCore.Auth.Core.Services;
 /// SEGURIDAD:
 /// - El código se almacena como hash SHA-256, nunca en texto plano.
 /// - La validación usa CryptographicOperations.FixedTimeEquals para prevenir timing attacks.
-/// - Los códigos son single-use: se eliminan de la caché tras la validación (éxito o fallo
-///   si coincide la clave, aunque el código no coincida, para forzar rate-limiting).
+/// - Los códigos son single-use: la entrada se elimina SOLO cuando el código coincide. Un intento
+///   erróneo NO la destruye (auditoría): el marcador anti-replay TOTP debe sobrevivir a fallos
+///   ajenos, o un intento inválido re-habilitaría el replay del código legítimo. El abuso de
+///   reintentos lo acotan el lockout legacy (MaxVerificationAttempts) y el scope MFA de S1.
 /// - La clave incluye userId para aislamiento entre usuarios.
 /// </remarks>
 public sealed class DistributedCacheMfaCodeStore : IMfaCodeStore
@@ -71,13 +73,12 @@ public sealed class DistributedCacheMfaCodeStore : IMfaCodeStore
             Encoding.UTF8.GetBytes(storedHash),
             Encoding.UTF8.GetBytes(providedHash));
 
-        // Eliminamos de la caché SIEMPRE (single-use).
-        // Incluso si el código no coincide, eliminamos para evitar que
-        // un mismo código pueda ser reutilizado en reintentos.
-        await _cache.RemoveAsync(key, cancellationToken);
-
+        // DIDÁCTICA (auditoría): eliminamos la entrada SOLO si el código coincide (single-use real).
+        // Si un intento inválido destruyera el marcador anti-replay TOTP, cualquier fallo ajeno
+        // re-habilitaría el replay del código legítimo dentro de la ventana de tolerancia.
         if (isValid)
         {
+            await _cache.RemoveAsync(key, cancellationToken);
             _logger.LogDebug("Código MFA validado correctamente para clave {Key}", key);
         }
         else

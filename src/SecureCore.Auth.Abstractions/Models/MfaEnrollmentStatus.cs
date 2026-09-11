@@ -1,8 +1,16 @@
+using System.Text.Json.Serialization;
+
 namespace SecureCore.Auth.Abstractions.Models;
 
 /// <summary>
 /// Estado del enrollment de autenticación multifactor (MFA).
 /// </summary>
+/// <remarks>
+/// DIDÁCTICA (F6): se serializa como string en JSON (JsonStringEnumConverter) para que las
+/// respuestas del framework (p. ej. <c>GET /auth/me</c>) expongan "Enrolled"/"Pending" y no
+/// enteros opacos al consumidor.
+/// </remarks>
+[JsonConverter(typeof(JsonStringEnumConverter))]
 public enum MfaEnrollmentStatus
 {
     /// <summary>

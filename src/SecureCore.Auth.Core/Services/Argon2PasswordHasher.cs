@@ -210,14 +210,16 @@ public sealed class Argon2PasswordHasher(IOptions<Argon2Options> options) : IPas
 
         // DIDÁCTICA: Versión asíncrona de la verificación ficticia.
         // Mantiene el mismo tiempo de ejecución que una verificación real
-        // para prevenir ataques de enumeración por timing.
-        await VerifyDummyPasswordAsyncImplementation(cancellationToken);
+        // para prevenir ataques de enumeración por timing. Hashea la contraseña
+        // PROVISTA (no un string fijo) para que el tiempo sea indistinguible
+        // del de una verificación real (auditoría).
+        await VerifyDummyPasswordAsyncImplementation(providedPassword, cancellationToken);
     }
 
     /// <summary>
     /// Implementación interna de la verificación ficticia async.
     /// </summary>
-    private async Task VerifyDummyPasswordAsyncImplementation(CancellationToken cancellationToken)
+    private async Task VerifyDummyPasswordAsyncImplementation(string providedPassword, CancellationToken cancellationToken)
     {
         await Task.Run(() =>
         {
@@ -225,7 +227,7 @@ public sealed class Argon2PasswordHasher(IOptions<Argon2Options> options) : IPas
             // pero dentro de Task.Run para no bloquear el thread de la request
             _ = TryParseHash(DummyHash, out var storedParams);
 
-            var argon2 = new Argon2id(Encoding.UTF8.GetBytes("dummy_password_for_timing"))
+            var argon2 = new Argon2id(Encoding.UTF8.GetBytes(providedPassword))
             {
                 Salt = storedParams.Salt,
                 DegreeOfParallelism = storedParams.Parallelism,

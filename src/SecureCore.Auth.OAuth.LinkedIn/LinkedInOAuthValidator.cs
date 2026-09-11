@@ -103,7 +103,8 @@ public class LinkedInOAuthValidator : IOAuthProviderValidator
         if (expectedNonce is not null)
         {
             var tokenNonce = jwt.Claims.FirstOrDefault(c => c.Type == "nonce")?.Value;
-            if (tokenNonce != expectedNonce)
+            // DIDÁCTICA (auditoría): comparación en tiempo constante (anti timing-attack del nonce).
+            if (!OAuthClaimHelper.FixedTimeEquals(tokenNonce, expectedNonce))
             {
                 return OAuthIdentityResult.Failure("invalid_nonce", "Nonce mismatch.");
             }

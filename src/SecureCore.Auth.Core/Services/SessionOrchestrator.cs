@@ -1,5 +1,6 @@
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using SecureCore.Auth.Abstractions;
 using SecureCore.Auth.Abstractions.Interfaces;
 using SecureCore.Auth.Abstractions.Models;
 using SecureCore.Auth.Abstractions.Options;
@@ -53,7 +54,7 @@ public sealed class SessionOrchestrator(
     {
         ArgumentNullException.ThrowIfNull(currentRefreshToken);
 
-        // Paso 1: Calcular el hash del token recibido y buscar en la DB
+        // Paso 1: Calcular el hash del token recibido y buscar en la DB (solo para el FamilyId).
         var tokenHash = tokenService.HashRefreshToken(currentRefreshToken);
         var existingEntry = await sessionStore.FindByTokenHashAsync(tokenHash, cancellationToken);
 
@@ -63,64 +64,57 @@ public sealed class SessionOrchestrator(
             return null;
         }
 
-        // Paso 2: Verificar si el token está revocado
-        if (existingEntry.IsRevoked)
+        // DIDÁCTICA (auditoría): el lock por familia se adquiere ANTES de las comprobaciones de
+        // estado. Sin re-leer dentro del lock, dos peticiones concurrentes con el mismo token
+        // observarían ambas el snapshot previo a la rotación y crearían DOS tokens vivos
+        // (TOCTOU): un token robado reproducido en paralelo produce dos sesiones válidas sin
+        // detección. Dentro del lock se re-lee la entrada fresca y se decide sobre ella.
+        using var @lock = await operationLock.AcquireAsync(
+            $"rtr:{existingEntry.FamilyId}",
+            _lockTimeout,
+            cancellationToken);
+
+        var entry = await sessionStore.FindByTokenHashAsync(tokenHash, cancellationToken);
+        if (entry is null)
         {
-            logger.LogCritical(
-                "¡REUSO DE TOKEN REVOCADO DETECTADO! FamilyId: {FamilyId}, UserId: {UserId}",
-                existingEntry.FamilyId, existingEntry.UserId);
-
-            // ⚠️ ALERTA: Reuso de token revocado = posible robo de sesión
-            // Revocar toda la familia de tokens
-            await sessionStore.RevokeByFamilyAsync(existingEntry.FamilyId, cancellationToken);
-
-            await eventDispatcher.DispatchAsync(new AuthEvent
-            {
-                EventType = AuthEventType.SuspiciousActivityDetected,
-                UserId = existingEntry.UserId,
-                Metadata = new Dictionary<string, string>
-                {
-                    ["reason"] = "revoked_token_reuse",
-                    ["familyId"] = existingEntry.FamilyId
-                }
-            }, cancellationToken);
-
+            logger.LogWarning("Token eliminado durante la rotación. FamilyId: {FamilyId}", existingEntry.FamilyId);
             return null;
         }
 
-        // Paso 3: Verificar si el token ya fue reemplazado (posible race condition o reuso)
-        if (existingEntry.ReplacedByTokenHash is not null)
+        // DIDÁCTICA (auditoría): ORDEN de las comprobaciones. Un token ROTADO se marca en el
+        // store como "reemplazado" (ReplacedByTokenHash) y, según la implementación, también
+        // IsRevoked=true. El grace period solo funciona si el chequeo de "reemplazado" ocurre
+        // ANTES que el de "revocado"; de lo contrario el periodo de gracia documentado
+        // (AGENTS.md §B) es código muerto y una race condition legítima del cliente revocaría
+        // toda la familia.
+        if (entry.ReplacedByTokenHash is not null)
         {
-            // DIDÁCTICA: Grace Period para race conditions en Refresh Token Rotation.
-            // Si el token fue reemplazado recientemente (dentro del periodo de gracia),
-            // permitimos el uso para evitar falsos positivos en escenarios de red inestable.
-            if (existingEntry.ReplacedAtUtc.HasValue)
+            if (entry.ReplacedAtUtc.HasValue)
             {
-                var timeSinceReplaced = DateTime.UtcNow - existingEntry.ReplacedAtUtc.Value;
+                var timeSinceReplaced = DateTime.UtcNow - entry.ReplacedAtUtc.Value;
 
-                // Grace Period: si fue reemplazado hace menos de N segundos, es una race condition
+                // Grace Period: si fue reemplazado hace menos de N segundos, es una race
+                // condition del cliente. Se devuelve una respuesta idempotente SIN revocar la
+                // familia ni rotar de nuevo.
                 if (timeSinceReplaced.TotalSeconds <= _options.GracePeriodSeconds)
                 {
                     logger.LogDebug(
-                        "Token dentro del periodo de gracia ({Seconds}s). Retornando respuesta existente.",
+                        "Token dentro del periodo de gracia ({Seconds}s). Respuesta idempotente.",
                         timeSinceReplaced.TotalSeconds);
 
-                    // Retornamos el token de reemplazo existente (idempotente)
-                    var replacementEntry = await sessionStore.FindByTokenHashAsync(
-                        existingEntry.ReplacedByTokenHash, cancellationToken);
-
-                    if (replacementEntry is not null)
+                    var user = await userStore.FindByIdAsync(entry.UserId, cancellationToken);
+                    if (user is not null)
                     {
-                        var user = await userStore.FindByIdAsync(existingEntry.UserId, cancellationToken);
-                        if (user is not null)
-                        {
-                            // Generamos un nuevo Access Token pero mantenemos la misma sesión
-                            var accessToken = tokenService.GenerateAccessToken(user);
-                            return new TokenResponse(
-                                accessToken,
-                                currentRefreshToken, // Mantenemos el mismo refresh token
-                                DateTimeOffset.UtcNow.Add(_options.AccessTokenLifetime));
-                        }
+                        // DIDÁCTICA (auditoría): con un store de hashes el valor en claro del token de
+                        // reemplazo NO es recuperable. Se devuelve un Access Token fresco y el
+                        // MISMO refresh token del cliente para mantener viva la sesión durante la
+                        // ventana (el cliente adoptará el nuevo token en la siguiente rotación).
+                        var accessToken = tokenService.GenerateAccessToken(
+                            WithSessionAuthClaims(user, entry.AuthMethod, entry.MfaMethod));
+                        return new TokenResponse(
+                            accessToken,
+                            currentRefreshToken,
+                            DateTimeOffset.UtcNow.Add(_options.AccessTokenLifetime));
                     }
 
                     return null;
@@ -129,105 +123,147 @@ public sealed class SessionOrchestrator(
                 // ⚠️ Fuera del periodo de gracia: REUSO DETECTADO
                 logger.LogCritical(
                     "¡REUSO DE TOKEN FUERA DEL PERIODO DE GRACIA! FamilyId: {FamilyId}, UserId: {UserId}",
-                    existingEntry.FamilyId, existingEntry.UserId);
+                    entry.FamilyId, entry.UserId);
 
-                await sessionStore.RevokeByFamilyAsync(existingEntry.FamilyId, cancellationToken);
+                await sessionStore.RevokeByFamilyAsync(entry.FamilyId, cancellationToken);
 
                 await eventDispatcher.DispatchAsync(new AuthEvent
                 {
                     EventType = AuthEventType.SuspiciousActivityDetected,
-                    UserId = existingEntry.UserId,
+                    UserId = entry.UserId,
                     Metadata = new Dictionary<string, string>
                     {
                         ["reason"] = "token_reuse_outside_grace_period",
-                        ["familyId"] = existingEntry.FamilyId,
+                        ["familyId"] = entry.FamilyId,
                         ["secondsSinceReplaced"] = timeSinceReplaced.TotalSeconds.ToString("F0")
                     }
                 }, cancellationToken);
 
                 return null;
             }
-            else
+
+            // ReplacedByTokenHash no es null pero ReplacedAtUtc es null: no podemos aplicar el
+            // grace period de forma segura → tratar como reuso.
+            logger.LogCritical(
+                "¡REUSO DE TOKEN - FECHA DESCONOCIDA! FamilyId: {FamilyId}, UserId: {UserId}",
+                entry.FamilyId, entry.UserId);
+
+            await sessionStore.RevokeByFamilyAsync(entry.FamilyId, cancellationToken);
+
+            await eventDispatcher.DispatchAsync(new AuthEvent
             {
-                // ReplacedByTokenHash no es null pero ReplacedAtUtc es null
-                // Esto es un caso edge - tratar como reuse
-                logger.LogCritical(
-                    "¡REUSO DE TOKEN - FECHA DESCONOCIDA! FamilyId: {FamilyId}, UserId: {UserId}",
-                    existingEntry.FamilyId, existingEntry.UserId);
-
-                await sessionStore.RevokeByFamilyAsync(existingEntry.FamilyId, cancellationToken);
-
-                await eventDispatcher.DispatchAsync(new AuthEvent
+                EventType = AuthEventType.SuspiciousActivityDetected,
+                UserId = entry.UserId,
+                Metadata = new Dictionary<string, string>
                 {
-                    EventType = AuthEventType.SuspiciousActivityDetected,
-                    UserId = existingEntry.UserId,
-                    Metadata = new Dictionary<string, string>
-                    {
-                        ["reason"] = "token_reuse_unknown_date",
-                        ["familyId"] = existingEntry.FamilyId
-                    }
-                }, cancellationToken);
+                    ["reason"] = "token_reuse_unknown_date",
+                    ["familyId"] = entry.FamilyId
+                }
+            }, cancellationToken);
 
-                return null;
-            }
-        }
-
-        // Paso 4: Verificar expiración
-        if (existingEntry.IsExpired)
-        {
-            logger.LogDebug("Token expirado. FamilyId: {FamilyId}", existingEntry.FamilyId);
             return null;
         }
 
-        // Paso 5: Token válido → Rotación exitosa
-        // DIDÁCTICA: Usamos un lock para prevenir race conditions en la rotación de tokens.
-        // El lock se acquire sobre el FamilyId para que solo una solicitud a la vez
-        // pueda rotar tokens de una sesión específica.
-        // Nota: Si la arquitectura es multi-instancia, el implementador debe registrar
-        // una implementación de IOperationLock que use un store distribuido (Redis, etc.)
-        using var @lock = await operationLock.AcquireAsync(
-            $"rtr:{existingEntry.FamilyId}",
-            _lockTimeout,
-            cancellationToken);
+        // Paso 2: Verificar si el token está revocado (logout/revocación explícita; un token
+        // rotado ya cayó en el ramo de arriba por ReplacedByTokenHash).
+        if (entry.IsRevoked)
+        {
+            logger.LogCritical(
+                "¡REUSO DE TOKEN REVOCADO DETECTADO! FamilyId: {FamilyId}, UserId: {UserId}",
+                entry.FamilyId, entry.UserId);
 
-        var newUser = await userStore.FindByIdAsync(existingEntry.UserId, cancellationToken);
+            // ⚠️ ALERTA: Reuso de token revocado = posible robo de sesión
+            // Revocar toda la familia de tokens
+            await sessionStore.RevokeByFamilyAsync(entry.FamilyId, cancellationToken);
+
+            await eventDispatcher.DispatchAsync(new AuthEvent
+            {
+                EventType = AuthEventType.SuspiciousActivityDetected,
+                UserId = entry.UserId,
+                Metadata = new Dictionary<string, string>
+                {
+                    ["reason"] = "revoked_token_reuse",
+                    ["familyId"] = entry.FamilyId
+                }
+            }, cancellationToken);
+
+            return null;
+        }
+
+        // Paso 3: Verificar expiración
+        if (entry.IsExpired)
+        {
+            logger.LogDebug("Token expirado. FamilyId: {FamilyId}", entry.FamilyId);
+            return null;
+        }
+
+        // Paso 4: Token válido → Rotación exitosa
+        var newUser = await userStore.FindByIdAsync(entry.UserId, cancellationToken);
         if (newUser is null)
         {
-            logger.LogWarning("Usuario {UserId} no encontrado durante rotación", existingEntry.UserId);
+            logger.LogWarning("Usuario {UserId} no encontrado durante rotación", entry.UserId);
             return null;
         }
 
-        // Generar nuevo par de tokens
-        var newTokens = await tokenService.GenerateTokenPairAsync(newUser, cancellationToken);
+        // Generar nuevo par de tokens, preservando el aseguramiento (amr/mfa_method) de la sesión.
+        var userWithClaims = WithSessionAuthClaims(newUser, entry.AuthMethod, entry.MfaMethod);
+        var newTokens = await tokenService.GenerateTokenPairAsync(userWithClaims, cancellationToken);
         var newTokenHash = tokenService.HashRefreshToken(newTokens.RefreshToken);
 
         // Marcar el token actual como "reemplazado" (no revocado, por el grace period)
         await sessionStore.RevokeAsync(tokenHash, newTokenHash, cancellationToken);
 
-        // Crear la nueva entrada con el mismo FamilyId
+        // Crear la nueva entrada con el mismo FamilyId y el MISMO aseguramiento de sesión.
         var newEntry = new RefreshTokenEntry
         {
             TokenHash = newTokenHash,
-            FamilyId = existingEntry.FamilyId,
-            UserId = existingEntry.UserId,
-            ExpiresAtUtc = DateTime.UtcNow.Add(_options.RefreshTokenLifetime)
+            FamilyId = entry.FamilyId,
+            UserId = entry.UserId,
+            ExpiresAtUtc = DateTime.UtcNow.Add(_options.RefreshTokenLifetime),
+            AuthMethod = entry.AuthMethod,
+            MfaMethod = entry.MfaMethod
         };
 
         await sessionStore.CreateAsync(newEntry, cancellationToken);
 
-        logger.LogDebug("Token rotado exitosamente. FamilyId: {FamilyId}", existingEntry.FamilyId);
+        logger.LogDebug("Token rotado exitosamente. FamilyId: {FamilyId}", entry.FamilyId);
 
         await eventDispatcher.DispatchAsync(new AuthEvent
         {
             EventType = AuthEventType.TokenRotated,
-            UserId = existingEntry.UserId,
+            UserId = entry.UserId,
             Metadata = new Dictionary<string, string>
             {
-                ["familyId"] = existingEntry.FamilyId
+                ["familyId"] = entry.FamilyId
             }
         }, cancellationToken);
 
         return newTokens;
+    }
+
+    /// <summary>
+    /// Re-inyecta el aseguramiento de la sesión (amr/mfa_method) en la identidad usada para
+    /// re-emitir tokens durante la rotación.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA (auditoría): el <c>amr</c> describe el método de la autenticación ORIGINAL y
+    /// debe sobrevivir al refresh. Se clona el diccionario de claims (no mutar el del store).
+    /// </remarks>
+    private static UserIdentity WithSessionAuthClaims(UserIdentity user, string? authMethod, string? mfaMethod)
+    {
+        if (authMethod is null)
+        {
+            return user;
+        }
+
+        var claims = new Dictionary<string, string>(user.Claims ?? []);
+        claims["amr"] = authMethod;
+        if (mfaMethod is not null)
+        {
+            claims["mfa_method"] = mfaMethod;
+        }
+
+        return user with { Claims = claims };
     }
 
     /// <summary>

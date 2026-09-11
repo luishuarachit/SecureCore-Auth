@@ -130,7 +130,8 @@ public class MicrosoftOAuthValidator : IOAuthProviderValidator
         if (!string.IsNullOrEmpty(expectedNonce))
         {
             var tokenNonce = jwtToken.Payload.ContainsKey("nonce") ? jwtToken.Payload["nonce"].ToString() : null;
-            if (tokenNonce != expectedNonce)
+            // DIDÁCTICA (auditoría): comparación en tiempo constante (anti timing-attack del nonce).
+            if (!OAuthClaimHelper.FixedTimeEquals(tokenNonce, expectedNonce))
                 return OAuthIdentityResult.Failure("invalid_nonce", "Nonce mismatch for security.");
         }
 

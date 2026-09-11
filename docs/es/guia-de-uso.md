@@ -1070,6 +1070,57 @@ distingue "código inexistente" de "ya consumido" ni de "cuenta bloqueada" (anti
 
 ---
 
+### Caso 12: Passwordless-first (login sin contraseña) — v3.2.0, F6 (A-25)
+
+**Escenario**: quieres que tus usuarios puedan iniciar sesión **sin contraseña** (passkeys) como
+postura de producto, manteniendo la contraseña como opción. La librería ya lo soporta de forma
+incremental y no-breaking.
+
+**Configuración** (todo es opt-in):
+
+```csharp
+builder.Services.AddSecureAuth(options =>
+{
+    // ...
+    options.Auth.EmitAmr = true; // RFC 8176: amr=pwd en password, mfa_method=webauthn en passkey
+})
+.AddPasswordAuthentication()
+.AddWebAuthn(webauthn => { /* ... */ });
+```
+
+**1 — El usuario sin contraseña inicia sesión con su passkey**. La ceremonia WebAuthn
+(`/auth/webauthn/login/begin` + `/complete`) funciona con cuentas **sin** contraseña
+(`PasswordHash` nullable de primera clase): el token se emite con `amr=webauthn`.
+
+**2 — El cliente consulta el perfil autenticado** (`GET /auth/me`) para conocer el estado de la
+cuenta (por ejemplo, en ajustes, para ofrecer "añadir contraseña"):
+
+```http
+GET /auth/me
+Authorization: Bearer ...
+// 200 → { "id": "u1", "email": "user@example.com", "hasPassword": false,
+//         "twoFactorEnabled": true, "mfaEnrollmentStatus": "Enrolled",
+//         "preferredMfaMethod": "totp" }
+```
+
+> `hasPassword` se lee **fresco** del store en cada llamada (nunca de un claim: un token emitido
+> antes de crear la contraseña mentiría tras el cambio).
+
+**3 — El usuario añade una contraseña** con el flujo existente `/verify-action/send` +
+`/verify-action/verify` + `/create-password` (exige step-up; NIST SP 800-63B).
+
+**4 — Orquestación programática (host)**: `SignInWithPasswordAsync(email, null)` devuelve
+`SignInResult.PasswordlessRequiresCredential` (con `ErrorCode` tipado) para que el host decida su
+UX, **sin** consultar el store ni revelar si la cuenta es passwordless (señal de request uniforme,
+sin oráculo de enumeración).
+
+> **DIDÁCTICA — anti-enumeración**: el endpoint `/login` exige `password` (`[Required]`); el estado
+> `PasswordlessRequiresCredential` es una señal a nivel de **request** (misma respuesta para emails
+> existentes o no). El `ErrorCode` de `SignInResult` es para el **host**; no lo expongas a clientes
+> no autenticados. El `hasPassword` solo se consulta vía `/auth/me` (autenticado).
+
+---
+
 ## Funcionalidades Avanzadas
 
 ### Passkeys / WebAuthn
@@ -1349,6 +1400,9 @@ builder.Services.AddSecureAuth(options =>
     // ═══ Rate limiting por IP de /recovery-codes/verify y /use (B1, auditoría) ═══
     // options.Auth.RecoveryVerifyRateLimiter = new() { MaxAttempts = 10, Window = TimeSpan.FromMinutes(1) };
     // options.Auth.RecoveryUseRateLimiter = new() { MaxAttempts = 5, Window = TimeSpan.FromMinutes(1) };
+
+    // ═══ Claims de método de autenticación (F6, RFC 8176) ═══
+    // options.Auth.EmitAmr = true; // amr=pwd en password; mfa_method=webauthn en passkey
 
     // Emisor para QR TOTP
     options.Auth.Mfa.TotpIssuer = "MiApp";

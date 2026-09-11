@@ -71,14 +71,19 @@ public class FacebookOAuthValidator : IOAuthProviderValidator
 
     public async Task<OAuthIdentityResult> ExchangeCodeAsync(string authorizationCode, string redirectUri, string? expectedNonce = null, CancellationToken cancellationToken = default)
     {
-        // 1. Intercambiar código por access token (short-lived)
-        var tokenUrl = $"{GetBaseUrl()}/oauth/access_token" +
-                      $"?client_id={_options.ClientId}" +
-                      $"&redirect_uri={Uri.EscapeDataString(redirectUri)}" +
-                      $"&client_secret={_options.ClientSecret}" +
-                      $"&code={authorizationCode}";
+        // 1. Intercambiar código por access token (short-lived). El client_secret va en el BODY
+        // (POST form), NUNCA en la query string: un secreto en la URL queda en logs de proxies,
+        // servidores, historial del navegador y referrers (auditoría).
+        var tokenUrl = $"{GetBaseUrl()}/oauth/access_token";
+        var formContent = new FormUrlEncodedContent(new Dictionary<string, string>
+        {
+            ["client_id"] = _options.ClientId,
+            ["redirect_uri"] = redirectUri,
+            ["client_secret"] = _options.ClientSecret,
+            ["code"] = authorizationCode
+        });
 
-        var response = await _httpClient.GetAsync(tokenUrl, cancellationToken);
+        var response = await _httpClient.PostAsync(tokenUrl, formContent, cancellationToken);
         if (!response.IsSuccessStatusCode)
         {
             var error = await response.Content.ReadAsStringAsync(cancellationToken);

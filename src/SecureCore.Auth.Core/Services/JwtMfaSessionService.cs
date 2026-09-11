@@ -2,6 +2,7 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Security.Claims;
 using System.Text;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using SecureCore.Auth.Abstractions.Interfaces;
@@ -14,7 +15,8 @@ namespace SecureCore.Auth.Core.Services;
 /// </summary>
 public sealed class JwtMfaSessionService(
     IOptions<JwtOptions> jwtOptions,
-    IMemoryCache cache) : IMfaSessionStore
+    IMemoryCache cache,
+    Microsoft.Extensions.Logging.ILogger<JwtMfaSessionService>? logger = null) : IMfaSessionStore
 {
     private const string ClaimMfaMethod = "mfa_method";
     private const string ClaimPurpose = "purpose";
@@ -152,6 +154,10 @@ public sealed class JwtMfaSessionService(
         }
         catch
         {
+            // DIDÁCTICA (auditoría): el catch vacío tragaba silenciosamente los fallos de
+            // validación del token MFA (firma, issuer, expiración), imposibles de diagnosticar
+            // en producción. Se registra un warning sin datos sensibles del token.
+            logger?.LogWarning("Validación de token de sesión MFA rechazada (firma/issuer/lifetime inválidos).");
             return null;
         }
     }

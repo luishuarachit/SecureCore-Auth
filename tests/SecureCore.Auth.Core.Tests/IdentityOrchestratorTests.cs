@@ -191,6 +191,100 @@ public class IdentityOrchestratorTests
             Arg.Is<AuthEvent>(e => e.EventType == AuthEventType.LoginSuccess),
             Arg.Any<CancellationToken>());
     }
+
+    // ─────────────────────────────────────────────
+    //  Passwordless (F6, A-25)
+    // ─────────────────────────────────────────────
+
+    [Fact]
+    public async Task SignInWithPasswordAsync_PasswordNull_ReturnsPasswordlessRequiresCredential_WithoutStoreLookup()
+    {
+        // DIDÁCTICA (S6, A-25): password null es una señal de REQUEST uniforme: se devuelve ANTES
+        // de consultar el store, por lo que NO es un oráculo de enumeración (mismo resultado para
+        // emails existentes o no).
+        var (result, tokens, _) = await _orchestrator.SignInWithPasswordAsync("test@example.com", null);
+
+        Assert.True(result.RequiresPasswordlessCredential);
+        Assert.Equal(nameof(SignInErrorCode.PasswordlessRequiresCredential), result.ErrorCode);
+        Assert.Null(tokens);
+        await _userStore.DidNotReceiveWithAnyArgs().FindByEmailAsync(
+            Arg.Any<string>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task SignInWithPasswordAsync_PasswordNull_DoesNotRunDummyVerify()
+    {
+        await _orchestrator.SignInWithPasswordAsync("test@example.com", null);
+
+        _passwordHasher.DidNotReceiveWithAnyArgs().VerifyDummyPassword(Arg.Any<string>());
+    }
+
+    [Fact]
+    public async Task SignInWithPasswordAsync_EmitAmrTrue_EmitsAmrPwdClaim()
+    {
+        var user = CreateTestUser();
+        _userStore.FindByEmailAsync(Arg.Any<string>())
+            .Returns(ValueTask.FromResult<UserIdentity?>(user));
+        _passwordHasher.VerifyPassword(Arg.Any<string>(), Arg.Any<string>())
+            .Returns(PasswordVerificationResult.Success);
+        _tokenService.GenerateTokenPairAsync(Arg.Any<UserIdentity>())
+            .Returns(Task.FromResult(new TokenResponse("jwt", "refresh", DateTimeOffset.UtcNow.AddMinutes(15))));
+        _tokenService.HashRefreshToken(Arg.Any<string>()).Returns("hashed-refresh");
+
+        var orchestrator = CreateOrchestrator(new SecureAuthOptions { EmitAmr = true });
+
+        var (result, _, _) = await orchestrator.SignInWithPasswordAsync("test@example.com", "correct");
+
+        Assert.True(result.Succeeded);
+        await _tokenService.Received(1).GenerateTokenPairAsync(
+            Arg.Is<UserIdentity>(u =>
+                u.Claims != null && u.Claims.GetValueOrDefault("amr") == "pwd"),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task SignInWithPasswordAsync_EmitAmrFalse_DoesNotMutateClaims()
+    {
+        var user = CreateTestUser() with { Claims = new Dictionary<string, string> { ["custom"] = "x" } };
+        _userStore.FindByEmailAsync(Arg.Any<string>())
+            .Returns(ValueTask.FromResult<UserIdentity?>(user));
+        _passwordHasher.VerifyPassword(Arg.Any<string>(), Arg.Any<string>())
+            .Returns(PasswordVerificationResult.Success);
+        _tokenService.GenerateTokenPairAsync(Arg.Any<UserIdentity>())
+            .Returns(Task.FromResult(new TokenResponse("jwt", "refresh", DateTimeOffset.UtcNow.AddMinutes(15))));
+        _tokenService.HashRefreshToken(Arg.Any<string>()).Returns("hashed-refresh");
+
+        var (result, _, _) = await _orchestrator.SignInWithPasswordAsync("test@example.com", "correct");
+
+        Assert.True(result.Succeeded);
+        // DIDÁCTICA (D6-05): sin EmitAmr el token no cambia (no-breaking).
+        await _tokenService.Received(1).GenerateTokenPairAsync(
+            Arg.Is<UserIdentity>(u =>
+                u.Claims != null &&
+                !u.Claims.ContainsKey("amr") &&
+                u.Claims.GetValueOrDefault("custom") == "x"),
+            Arg.Any<CancellationToken>());
+    }
+
+    private IdentityOrchestrator CreateOrchestrator(SecureAuthOptions options)
+    {
+        var authOptions = Options.Create(options);
+        var mfaOptions = Options.Create(new MfaOptions { Enabled = true, AllowedMethods = new List<string> { "totp", "email" } });
+        var lockoutManager = new LockoutManager(_userStore, authOptions, NullLogger<LockoutManager>.Instance);
+
+        return new IdentityOrchestrator(
+            _userStore,
+            _passwordHasher,
+            _tokenService,
+            _sessionStore,
+            lockoutManager,
+            _eventDispatcher,
+            authOptions,
+            mfaOptions,
+            _mfaSessionStore,
+            _mfaService,
+            NullLogger<IdentityOrchestrator>.Instance);
+    }
 }
 
 /// <summary>

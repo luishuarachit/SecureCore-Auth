@@ -12,7 +12,7 @@ namespace SecureCore.Auth.Abstractions.Options;
 /// - Algoritmo de firma: HS256 (simétrico) o RS256/ES256 (asimétrico).
 ///
 /// SEGURIDAD: Recomendamos RS256 o ES256 (asimétrico) para producción:
-/// - HS256 usa la MISMA clave para firmar y validar. Si se filtra, cualquiera puede伪造 tokens.
+/// - HS256 usa la MISMA clave para firmar y validar. Si se filtra, cualquiera puede falsificar tokens.
 /// - RS256/ES256 usa una CLAVE PRIVADA para firmar y una CLAVE PÚBLICA para validar.
 ///   La clave pública puede distribuirse, pero la privada debe mantenerse en secreto.
 ///

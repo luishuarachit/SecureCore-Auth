@@ -117,7 +117,8 @@ public class AppleOAuthValidator : IOAuthProviderValidator
             if (shouldValidateNonce)
             {
                 var expectedNonceHash = ComputeNonceHash(expectedNonce);
-                if (tokenNonce != expectedNonceHash)
+                // DIDÁCTICA (auditoría): comparación en tiempo constante (anti timing-attack del nonce).
+                if (!OAuthClaimHelper.FixedTimeEquals(tokenNonce, expectedNonceHash))
                 {
                     return OAuthIdentityResult.Failure("invalid_nonce", "Security threat: Nonce mismatch.");
                 }
