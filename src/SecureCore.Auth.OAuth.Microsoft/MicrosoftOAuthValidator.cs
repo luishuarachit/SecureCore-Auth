@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IdentityModel.Tokens.Jwt;
 using System.Net.Http;
 using System.Net.Http.Json;
 using System.Security.Claims;
@@ -7,7 +8,6 @@ using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.IdentityModel.Tokens;
-using System.IdentityModel.Tokens.Jwt;
 using SecureCore.Auth.Abstractions.Interfaces;
 using SecureCore.Auth.Abstractions.Models;
 using SecureCore.Auth.OAuth;
@@ -31,10 +31,10 @@ public class MicrosoftOAuthOptions
 /// Validador para Microsoft Entra ID (antes Azure AD).
 /// Implementa OIDC v2.0 y soporta validación dinámica de Issuers para entornos multi-tenant.
 /// </summary>
-public class MicrosoftOAuthValidator : IOAuthProviderValidator
+public class MicrosoftOAuthValidator(MicrosoftOAuthOptions options, HttpClient httpClient) : IOAuthProviderValidator
 {
-    private readonly MicrosoftOAuthOptions _options;
-    private readonly HttpClient _httpClient;
+    private readonly MicrosoftOAuthOptions _options = options;
+    private readonly HttpClient _httpClient = httpClient;
     private readonly JwtSecurityTokenHandler _tokenHandler = new();
 
     // Caché JWKS con Lazy<Task> para evitar cuello de botella en alta concurrencia
@@ -42,12 +42,6 @@ public class MicrosoftOAuthValidator : IOAuthProviderValidator
     private static DateTime _jwksLastRefreshed;
     private static readonly TimeSpan JwksCacheDuration = TimeSpan.FromHours(24);
     private static readonly object _cacheLock = new();
-
-    public MicrosoftOAuthValidator(MicrosoftOAuthOptions options, HttpClient httpClient)
-    {
-        _options = options;
-        _httpClient = httpClient;
-    }
 
     public string ProviderName => "Microsoft";
 

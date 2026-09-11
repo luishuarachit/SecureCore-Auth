@@ -322,7 +322,7 @@ Coordinates the authentication flow. It contains no cryptographic logic but orch
   - **First-class nullable password**: `password == null` → `SignInResult.PasswordlessRequiresCredential` **without touching the store** (a REQUEST-level signal, uniform for every email → no enumeration oracle). `VerifyDummyPassword` only runs with a non-null password.
   - `SignInResult` exposes a typed `ErrorCode` (`SignInErrorCode`) for the host to drive its UX programmatically: `InvalidCredentials`, `AccountLockedOut`, `TwoFactorRequired`, `TwoFactorRegistrationRequired`, `PasswordlessRequiresCredential`, `GenericFailure`. **Security rule**: do not expose `ErrorCode` to unauthenticated clients (distinguishing codes would be an enumeration oracle); the framework keeps HTTP responses uniform.
   - The success path fires `LoginSuccess` with metadata `method=password` and, when `EmitAmr` is enabled, the `amr=pwd` claim (RFC 8176).
-- **`SignInExternalAsync(provider, providerKey)`**: Processes login for users authenticated via OAuth (Google, GitHub, etc.). Links external identity with a local session.
+- **`SignInExternalAsync(provider, providerKey)`**: Processes login for users authenticated via OAuth (Google, GitHub, etc.). Links external identity with a local session. With `EmitAmr` enabled it emits `amr=oauth` (and persists it in `RefreshTokenEntry.AuthMethod` so it survives rotation).
 - **`CompleteMfaLoginWithRecoveryCodeAsync(mfaSessionToken, recoveryCode, rotateSecurityStamp, ct)`** (v3.2.0, A1 F5 audit): completes login with an already-redeemed recovery code. Unlike `CompleteMfaLoginAsync` (which requires a TOTP/email `mfaCode`), this flow redeems the recovery code (single-use via `RecoveryCodeOrchestrator.UseAsync`), consumes the session token, issues tokens with `amr=mfa`/`mfa_method=recovery` and opens the `mfa_verified` window (S3 parity). The `rotateSecurityStamp` flag (host policy) rotates the SecurityStamp, invalidates its cache and revokes **all** previous sessions (recommended after a lost/stolen MFA device); with `false`, the current session and stamp are kept. The S1 lockout (scope `Recovery`) maps to a generic login failure (cause not revealed). Requires `AddMfa()` (returns `Failed` without a registered `RecoveryCodeOrchestrator`).
 
 ### 4.2. ITokenService (JwtTokenService)
@@ -654,6 +654,19 @@ generic, anti-enumeration responses; 503 when the orchestrator is not registered
 > its own method. Also, `verify`/`use` are anonymous but tutored: the account is resolved from the
 > `mfaSessionToken` (never from a `userId` in the body), preventing probing codes against arbitrary
 > accounts.
+
+**A-24 (v3.2.0) — Access-token blacklist (opt-in)**:
+
+Real access-token revocation comes from the SecurityStamp (global) and RTR (family); an
+individual-session logout does not rotate the stamp, so the access token would stay alive until
+expiry. For hosts that need to revoke it:
+
+- `ITokenBlacklist` (SPI): `AddAsync(jti, ttl)` / `IsBlacklistedAsync(jti)`. Default registered is
+  `NoOpTokenBlacklist` (no-op) → without a real host implementation, **behavior is unchanged** (D-03).
+- `POST /logout` extracts the access token's `jti` (unvalidated parse) and blacklists it with TTL =
+  remaining lifetime.
+- JWT validation (`OnTokenValidated` hook) rejects blacklisted jti per request.
+- The host registers its implementation (in-memory, Redis, etc.) BEFORE `AddSecureAuth()` (TryAdd).
 
 ---
 

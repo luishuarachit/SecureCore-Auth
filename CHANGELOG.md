@@ -5,7 +5,7 @@ Todas los cambios notables en este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 y este proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - v3.2.0
+## [3.2.0] - 2026-09-11
 
 ### Añadido
 - **Límite de tamaño de payload en endpoints de autenticación (A-10)**:
@@ -47,6 +47,8 @@ y este proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.
   - `SignInErrorCode` (enum tipado) + `SignInResult.ErrorCode` (string) + `RequiresPasswordlessCredential`: `SignInWithPasswordAsync(email, string? password)` acepta password nullable; `password == null` → `PasswordlessRequiresCredential` SIN consultar el store (señal de REQUEST uniforme, sin oráculo de enumeración; `VerifyDummyPassword` solo con password no nulo). Aditivo y non-breaking (los bools pre-existentes se conservan). El `ErrorCode` es para el host; no exponerlo a clientes no autenticados.
   - **Claim `amr` consistente (RFC 8176)**: nueva opción `SecureAuthOptions.EmitAmr` (default false, opt-in). Al activarla, el login por contraseña emite `amr=pwd` y el login WebAuthn añade `mfa_method=webauthn` (MFA ya emite `amr=mfa` + `mfa_method`). El evento `LoginSuccess` del login por contraseña gana metadata `method=password` (paridad de observabilidad).
   - **Endpoint `GET /auth/me`**: perfil autenticado `{ id, email, hasPassword, twoFactorEnabled, mfaEnrollmentStatus, preferredMfaMethod }`. `hasPassword` se lee fresco del store en cada llamada (nunca de un claim, que mentiría tras crear la contraseña). 503 sin `IUserStore`; usuario no encontrado → 401 genérico. `MfaEnrollmentStatus` ahora se serializa como string (JsonStringEnumConverter) en las respuestas del framework.
+- **Blacklist de access tokens SPI opt-in (A-24)**: `ITokenBlacklist` (`AddAsync(jti, ttl)` / `IsBlacklistedAsync(jti)`) con default `NoOpTokenBlacklist` (no-op → comportamiento previo intacto, D-03). `POST /logout` extrae el `jti` del access token (parseo sin validación) y lo blacklistea con TTL = vida restante; la validación JWT (`OnTokenValidated`) lo rechaza por request. El host registra su implementación ANTES de `AddSecureAuth()`.
+- **`amr=oauth` en login OAuth (F6, RFC 8176)**: con `EmitAmr`, `SignInExternalAsync` emite `amr=oauth` y lo persiste en `RefreshTokenEntry.AuthMethod` (completa la emisión por método `pwd|webauthn|oauth|mfa`).
 
 ### Corregido
 - Correcciones de la auditoría integral (F0-F6) — seguridad, funcionalidad rota y deuda "parche vs solución":

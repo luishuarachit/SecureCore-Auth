@@ -1,3 +1,4 @@
+using System.IdentityModel.Tokens.Jwt;
 using System.Security.Cryptography;
 using System.Text;
 using Fido2NetLib;
@@ -685,6 +686,12 @@ public static class ServiceCollectionExtensions
         //   services.AddScoped<ISingleUseTokenStore, MyRedisSingleUseTokenStore>();
         services.TryAddScoped<ISingleUseTokenStore, DistributedCacheSingleUseTokenStore>();
 
+        // DIDÁCTICA (A-24): blacklist de access tokens (jti) como SPI OPT-IN. Default no-op:
+        // sin una implementación real del host, el logout NO blacklistea y la validación NO
+        // rechaza (comportamiento previo intacto). El host registra su implementación ANTES de
+        // AddSecureAuth() (TryAdd) y el framework la usa en /logout y en la validación JWT.
+        services.TryAddSingleton<ITokenBlacklist, NoOpTokenBlacklist>();
+
         // Registrar el despachador de eventos con enriquecimiento de contexto HTTP
         services.TryAddSingleton<IHttpContextAccessor, HttpContextAccessor>();
         services.AddScoped<AuthEventDispatcher>();
@@ -707,6 +714,33 @@ public static class ServiceCollectionExtensions
                     ValidAudience = config.Jwt.Audience,
                     IssuerSigningKey = CreateIssuerSigningKey(config.Jwt),
                     ClockSkew = config.Auth.ClockSkew
+                };
+
+                // DIDÁCTICA (A-24): hook OPT-IN de blacklist de access tokens. Con el default
+                // NoOpTokenBlacklist el chequeo es no-op (devuelve false); el host que registra su
+                // implementación consigue que un jti revocado en /logout falle la autenticación.
+                // El jti se lee del token validado (context.SecurityToken.Id) sin replicar el parser.
+                options.Events = new JwtBearerEvents
+                {
+                    OnTokenValidated = async context =>
+                    {
+                        var blacklist = context.HttpContext.RequestServices.GetService<ITokenBlacklist>();
+                        if (blacklist is null)
+                        {
+                            return;
+                        }
+
+                        var jti = (context.SecurityToken as JwtSecurityToken)?.Id;
+                        if (string.IsNullOrEmpty(jti))
+                        {
+                            return;
+                        }
+
+                        if (await blacklist.IsBlacklistedAsync(jti, context.HttpContext.RequestAborted))
+                        {
+                            context.Fail("El token de acceso fue revocado.");
+                        }
+                    }
                 };
             });
 

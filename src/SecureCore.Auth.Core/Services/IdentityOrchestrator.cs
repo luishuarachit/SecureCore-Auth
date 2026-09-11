@@ -513,7 +513,18 @@ public sealed class IdentityOrchestrator(
 
         // Paso 3: Login exitoso
         await userStore.ResetFailedAccessCountAsync(user.Id, cancellationToken);
-        var tokens = await tokenService.GenerateTokenPairAsync(user, cancellationToken);
+
+        // DIDÁCTICA (S6, A-25 / RFC 8176): con EmitAmr el login OAuth expresa el método de
+        // autenticación (amr=oauth) de forma consistente con password/MFA/WebAuthn. Opt-in.
+        var userWithClaims = user;
+        if (_options.EmitAmr)
+        {
+            var customClaims = new Dictionary<string, string>(user.Claims ?? []);
+            customClaims["amr"] = "oauth";
+            userWithClaims = user with { Claims = customClaims };
+        }
+
+        var tokens = await tokenService.GenerateTokenPairAsync(userWithClaims, cancellationToken);
 
         // Paso 4: Almacenar la sesión
         var tokenHash = tokenService.HashRefreshToken(tokens.RefreshToken);
@@ -522,7 +533,8 @@ public sealed class IdentityOrchestrator(
             TokenHash = tokenHash,
             FamilyId = Guid.NewGuid().ToString(),
             UserId = user.Id,
-            ExpiresAtUtc = DateTime.UtcNow.Add(_options.RefreshTokenLifetime)
+            ExpiresAtUtc = DateTime.UtcNow.Add(_options.RefreshTokenLifetime),
+            AuthMethod = _options.EmitAmr ? "oauth" : null
         };
 
         await sessionStore.CreateAsync(refreshEntry, cancellationToken);

@@ -20,7 +20,7 @@
   </PropertyGroup>
 
   <PropertyGroup>
-    <Version>3.1.8</Version>
+    <Version>3.2.0</Version>
     <Authors>SecureCore Auth Contributors</Authors>
     <Company>SecureCore</Company>
     <Product>SecureCore Auth Framework</Product>

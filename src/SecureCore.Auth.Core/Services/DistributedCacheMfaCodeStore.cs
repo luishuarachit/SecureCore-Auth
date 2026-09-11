@@ -23,18 +23,12 @@ namespace SecureCore.Auth.Core.Services;
 ///   reintentos lo acotan el lockout legacy (MaxVerificationAttempts) y el scope MFA de S1.
 /// - La clave incluye userId para aislamiento entre usuarios.
 /// </remarks>
-public sealed class DistributedCacheMfaCodeStore : IMfaCodeStore
+public sealed class DistributedCacheMfaCodeStore(
+    IDistributedCache cache,
+    ILogger<DistributedCacheMfaCodeStore> logger) : IMfaCodeStore
 {
-    private readonly IDistributedCache _cache;
-    private readonly ILogger<DistributedCacheMfaCodeStore> _logger;
-
-    public DistributedCacheMfaCodeStore(
-        IDistributedCache cache,
-        ILogger<DistributedCacheMfaCodeStore> logger)
-    {
-        _cache = cache;
-        _logger = logger;
-    }
+    private readonly IDistributedCache _cache = cache;
+    private readonly ILogger<DistributedCacheMfaCodeStore> _logger = logger;
 
     public async Task StoreCodeHashAsync(
         string key,

@@ -51,7 +51,7 @@ public sealed class TotpService : ITotpService
         var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         var currentStep = now / StepIntervalSeconds;
 
-        for (int i = -TolerantSteps; i <= TolerantSteps; i++)
+        for (var i = -TolerantSteps; i <= TolerantSteps; i++)
         {
             var step = currentStep + i;
             var expectedCode = GenerateCodeForStep(secret, step);
@@ -69,7 +69,7 @@ public sealed class TotpService : ITotpService
     public List<string> GenerateRecoveryCodes(int count)
     {
         var codes = new List<string>();
-        for (int i = 0; i < count; i++)
+        for (var i = 0; i < count; i++)
         {
             var bytes = new byte[16];
             RandomNumberGenerator.Fill(bytes);

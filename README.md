@@ -1,6 +1,6 @@
 # SecureCore Auth Framework 🛡️
 
-[![Version](https://img.shields.io/badge/version-3.1.8-blue.svg)](https://github.com/luishuarachit/SecureCore-Auth)
+[![Version](https://img.shields.io/badge/version-3.2.0-blue.svg)](https://github.com/luishuarachit/SecureCore-Auth)
 [![.NET](https://img.shields.io/badge/.NET-10.0-unlocked.svg)](https://dotnet.microsoft.com/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -66,11 +66,18 @@ app.MapSecureAuthEndpoints("/auth"); // Mapea login, refresh, logout automática
 ## 🔒 Características de Seguridad
 
 -   **Argon2id**: Hashing de contraseñas de última generación.
--   **Refresh Token Rotation (RTR)**: Protege contra el robo de tokens en clientes (SPAs/Mobile).
+-   **Passkeys / WebAuthn (primera clase)**: Ceremonias de registro y login completas (challenge single-use atómico, origin check fail-closed, anti-enumeración, rate limiting por IP y tope de payload propio).
+-   **Passwordless-first (A-25)**: Contraseña nullable de primera clase; `SignInWithPasswordAsync(email, null)` → `PasswordlessRequiresCredential` (sin oráculo de enumeración); `GET /auth/me` expone `hasPassword`; claims `amr` por método (`pwd|webauthn|oauth|mfa`, RFC 8176, opt-in `EmitAmr`).
+-   **Recovery codes de primera clase**: Generación, verificación (peek no consumidor) y redención single-use atómico; solo se persisten hashes SHA-256; expiración configurable; scope anti-abuso propio.
+-   **Anti-abuso por cuenta (S1)**: Lockout multi-scope, temporal y escalonado (contraseña, MFA, passkey, recovery, verify-action), distribuible por SPI, default in-memory.
+-   **Refresh Token Rotation (RTR)**: Protege contra el robo de tokens; con **periodo de gracia** real para condiciones de carrera y preservación del aseguramiento (`amr`/`mfa_method`) en la rotación.
 -   **Security Stamp Versioning (SSV)**: Permite invalidar todas las sesiones de un usuario de forma inmediata (Panic Button).
--   **Constant-Time Verification**: Previene ataques de tiempo durante la validación de credenciales.
--   **Multi-Factor Authentication (MFA)**: TOTP (RFC 6238) y códigos por email con cifrado AES-256-GCM de secretos.
--   **OAuth2/OIDC**: Login social (Google, Microsoft, Apple, GitHub, Facebook, LinkedIn, TikTok) con validación criptográfica de JWKS.
+-   **MFA + step-up (S3)**: TOTP (RFC 6238), códigos por email, ventana `mfa_verified`, verify-action y creación/cambio de contraseña con re-emisión de tokens.
+-   **Constant-Time Verification**: Previene ataques de tiempo durante la validación de credenciales (Argon2 dummy, nonce OIDC, OTP).
+-   **Anti-replay y single-use atómico (S2)**: Primitiva transversal "consumir una vez" para OAuth state, challenges WebAuthn, OTP y recovery codes (extensible a GETDEL/Lua en Redis).
+-   **OAuth2/OIDC**: Login social (Google, Microsoft, Apple, GitHub, Facebook, LinkedIn, TikTok) con validación criptográfica de JWKS y `client_secret` nunca en URLs.
+-   **Blacklist de access tokens opt-in (A-24)**: `ITokenBlacklist` (default no-op) — el host puede revocar el `jti` del access token en el logout con TTL = vida restante.
+-   **Protección anti-DoS**: Límites de payload en endpoints anónimos y rate limiting por IP (login, forgot-password, WebAuthn, recovery codes).
 
 ---
 
@@ -95,7 +102,7 @@ Desarrollado con ❤️ por el equipo de **SecureCore**.
 
 # SecureCore Auth Framework 🛡️
 
-[![Version](https://img.shields.io/badge/version-3.1.8-blue.svg)](https://github.com/luishuarachit/SecureCore-Auth)
+[![Version](https://img.shields.io/badge/version-3.2.0-blue.svg)](https://github.com/luishuarachit/SecureCore-Auth)
 [![.NET](https://img.shields.io/badge/.NET-10.0-unlocked.svg)](https://dotnet.microsoft.com/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -161,11 +168,18 @@ app.MapSecureAuthEndpoints("/auth"); // Maps login, refresh, logout automaticall
 ## 🔒 Security Features
 
 -   **Argon2id**: State-of-the-art password hashing.
--   **Refresh Token Rotation (RTR)**: Protects against token theft on clients (SPAs/Mobile).
+-   **Passkeys / WebAuthn (first-class)**: Full register/login ceremonies (atomic single-use challenge, fail-closed origin check, anti-enumeration, per-IP rate limiting and dedicated payload cap).
+-   **Passwordless-first (A-25)**: First-class nullable password; `SignInWithPasswordAsync(email, null)` → `PasswordlessRequiresCredential` (no enumeration oracle); `GET /auth/me` exposes `hasPassword`; per-method `amr` claims (`pwd|webauthn|oauth|mfa`, RFC 8176, opt-in `EmitAmr`).
+-   **First-class recovery codes**: Generation, non-consuming verification and atomic single-use redemption; only SHA-256 hashes persisted; configurable expiry; dedicated anti-abuse scope.
+-   **Per-account abuse prevention (S1)**: Multi-scope, time-based, escalating lockout (password, MFA, passkey, recovery, verify-action), distributable via SPI, in-memory default.
+-   **Refresh Token Rotation (RTR)**: Protects against token theft; with a real **grace period** for client races and session assurance (`amr`/`mfa_method`) preserved across rotation.
 -   **Security Stamp Versioning (SSV)**: Invalidate all of a user's sessions instantly (Panic Button).
--   **Constant-Time Verification**: Prevents timing attacks during credential validation.
--   **Multi-Factor Authentication (MFA)**: TOTP (RFC 6238) and email codes with AES-256-GCM secret encryption.
--   **OAuth2/OIDC**: Social login (Google, Microsoft, Apple, GitHub, Facebook, LinkedIn, TikTok) with cryptographic JWKS validation.
+-   **MFA + step-up (S3)**: TOTP (RFC 6238), email codes, `mfa_verified` window, verify-action, and create/change password with token re-issuance.
+-   **Constant-Time Verification**: Prevents timing attacks during credential validation (Argon2 dummy, OIDC nonce, OTP).
+-   **Atomic anti-replay / single-use (S2)**: Cross-cutting "consume once" primitive for OAuth state, WebAuthn challenges, OTP and recovery codes (extensible to Redis GETDEL/Lua).
+-   **OAuth2/OIDC**: Social login (Google, Microsoft, Apple, GitHub, Facebook, LinkedIn, TikTok) with cryptographic JWKS validation and `client_secret` never in URLs.
+-   **Opt-in access-token blacklist (A-24)**: `ITokenBlacklist` (no-op default) — hosts can revoke the access token's `jti` on logout with TTL = remaining lifetime.
+-   **Anti-DoS**: Payload limits on anonymous endpoints and per-IP rate limiting (login, forgot-password, WebAuthn, recovery codes).
 
 ---
 

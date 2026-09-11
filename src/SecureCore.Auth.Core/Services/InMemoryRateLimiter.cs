@@ -81,22 +81,16 @@ namespace SecureCore.Auth.Core.Services;
 /// - On successful login, call Reset(ip) to clear counter
 /// - On 429 response, include Retry-After header
 /// </remarks>
-public sealed class InMemoryRateLimiter : IRateLimiter
+/// <remarks>
+/// Creates a new InMemoryRateLimiter with the specified configuration.
+/// </remarks>
+/// <param name="maxAttemptsPerWindow">Maximum attempts allowed within the time window.</param>
+/// <param name="window">Time window for rate limiting.</param>
+public sealed class InMemoryRateLimiter(int maxAttemptsPerWindow, TimeSpan window) : IRateLimiter
 {
     private readonly ConcurrentDictionary<string, RateLimitEntry> _attempts = new();
-    private readonly int _maxAttemptsPerWindow;
-    private readonly TimeSpan _window;
-
-    /// <summary>
-    /// Creates a new InMemoryRateLimiter with the specified configuration.
-    /// </summary>
-    /// <param name="maxAttemptsPerWindow">Maximum attempts allowed within the time window.</param>
-    /// <param name="window">Time window for rate limiting.</param>
-    public InMemoryRateLimiter(int maxAttemptsPerWindow, TimeSpan window)
-    {
-        _maxAttemptsPerWindow = maxAttemptsPerWindow;
-        _window = window;
-    }
+    private readonly int _maxAttemptsPerWindow = maxAttemptsPerWindow;
+    private readonly TimeSpan _window = window;
 
     /// <summary>
     /// Creates a new InMemoryRateLimiter with default configuration (10 attempts per minute).

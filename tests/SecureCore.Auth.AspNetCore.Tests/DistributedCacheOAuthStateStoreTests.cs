@@ -157,7 +157,7 @@ public class DistributedCacheOAuthStateStoreTests
             Arg.Is<string>(json => json.Contains(entry.Nonce) && json.Contains(entry.Provider)),
             ttl,
             Arg.Any<CancellationToken>());
-        await cache.DidNotReceiveWithAnyArgs().SetAsync(default, default, default, default);
+        await cache.DidNotReceiveWithAnyArgs().SetAsync(null!, null!, null!, default);
     }
 
     [Fact]
@@ -189,6 +189,6 @@ public class DistributedCacheOAuthStateStoreTests
         // Act + Assert
         await Assert.ThrowsAsync<ArgumentNullException>(() =>
             sut.SaveAsync(ValidState, null!, TimeSpan.FromMinutes(10)));
-        await store.DidNotReceiveWithAnyArgs().SetAsync(default, default, default, default);
+        await store.DidNotReceiveWithAnyArgs().SetAsync(null!, null!, default, default);
     }
 }

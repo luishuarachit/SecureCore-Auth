@@ -3,9 +3,9 @@ using System.Collections.Generic;
 using System.IdentityModel.Tokens.Jwt;
 using System.Linq;
 using System.Net.Http;
+using System.Net.Http.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Net.Http.Json;
 using Microsoft.IdentityModel.Tokens;
 using SecureCore.Auth.Abstractions.Interfaces;
 using SecureCore.Auth.Abstractions.Models;
@@ -25,10 +25,10 @@ public class GoogleOAuthOptions
 /// OIDC es una capa de identidad sobre OAuth 2.0 que nos permite obtener
 /// un "ID Token" (un JWT firmado) que contiene la información verificada del usuario.
 /// </summary>
-public class GoogleOAuthValidator : IOAuthProviderValidator
+public class GoogleOAuthValidator(GoogleOAuthOptions options, HttpClient httpClient) : IOAuthProviderValidator
 {
-    private readonly GoogleOAuthOptions _options;
-    private readonly HttpClient _httpClient;
+    private readonly GoogleOAuthOptions _options = options;
+    private readonly HttpClient _httpClient = httpClient;
     private readonly JwtSecurityTokenHandler _tokenHandler = new();
 
     // DIDÁCTICA: Caché JWKS con Lazy<Task> para evitar cuello de botella en alta concurrencia.
@@ -42,12 +42,6 @@ public class GoogleOAuthValidator : IOAuthProviderValidator
 
     private const string JwksUri = "https://www.googleapis.com/oauth2/v3/certs";
     private const string TokenEndpoint = "https://oauth2.googleapis.com/token";
-
-    public GoogleOAuthValidator(GoogleOAuthOptions options, HttpClient httpClient)
-    {
-        _options = options;
-        _httpClient = httpClient;
-    }
 
     public string ProviderName => "Google";
 

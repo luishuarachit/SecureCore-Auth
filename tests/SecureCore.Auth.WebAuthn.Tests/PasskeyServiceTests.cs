@@ -192,7 +192,7 @@ public class PasskeyServiceTests
         Assert.False(result.CredentialFound);
         Assert.False(result.SignatureValid);
         Assert.Null(result.User);
-        _fido2.DidNotReceive().MakeAssertionAsync(Arg.Any<MakeAssertionParams>(), Arg.Any<CancellationToken>());
+        await _fido2.DidNotReceive().MakeAssertionAsync(Arg.Any<MakeAssertionParams>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -209,8 +209,8 @@ public class PasskeyServiceTests
         Assert.False(result.CredentialFound);
         Assert.False(result.SignatureValid);
         Assert.Null(result.User);
-        _credentialStore.DidNotReceive().FindByCredentialIdAsync(Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
-        _fido2.DidNotReceive().MakeAssertionAsync(Arg.Any<MakeAssertionParams>(), Arg.Any<CancellationToken>());
+        await _credentialStore.DidNotReceive().FindByCredentialIdAsync(Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
+        await _fido2.DidNotReceive().MakeAssertionAsync(Arg.Any<MakeAssertionParams>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]
@@ -226,7 +226,7 @@ public class PasskeyServiceTests
 
         // Assert
         Assert.False(result.CredentialFound);
-        _fido2.DidNotReceive().MakeAssertionAsync(Arg.Any<MakeAssertionParams>(), Arg.Any<CancellationToken>());
+        await _fido2.DidNotReceive().MakeAssertionAsync(Arg.Any<MakeAssertionParams>(), Arg.Any<CancellationToken>());
     }
 
     [Fact]

@@ -243,7 +243,7 @@ public class SecureAuthRecoveryEndpointsTests
         // amplificación de CPU/caché (validación JWT por request) ANTES de validar el token.
         var host = new RecoveryHostBuilder { EnableRecoveryCodes = true, VerifyRateLimit = 2 }.Build();
 
-        for (int i = 0; i < 2; i++)
+        for (var i = 0; i < 2; i++)
         {
             var ok = await host.Client.PostAsync("/auth/recovery-codes/verify",
                 PostJson("""{"mfaSessionToken":"bad","code":"bad"}"""));
@@ -261,7 +261,7 @@ public class SecureAuthRecoveryEndpointsTests
     {
         var host = new RecoveryHostBuilder { EnableRecoveryCodes = true, UseRateLimit = 2 }.Build();
 
-        for (int i = 0; i < 2; i++)
+        for (var i = 0; i < 2; i++)
         {
             var ok = await host.Client.PostAsync("/auth/recovery-codes/use",
                 PostJson("""{"mfaSessionToken":"bad","code":"bad"}"""));

@@ -66,18 +66,20 @@ public class JwtOptionsValidator : IValidateOptions<JwtOptions>
             // 4. Validar claves según el algoritmo
             if (algo == "HS256")
             {
-                if (string.IsNullOrEmpty(options.SigningKey))
+                var signingKey = options.SigningKey;
+                if (string.IsNullOrEmpty(signingKey))
                 {
                     errors.Add("Jwt:SigningKey es requerido para HS256.");
                 }
-                else if (options.SigningKey.Length < MinSigningKeyLength)
+                else if (signingKey.Length < MinSigningKeyLength)
                 {
                     errors.Add($"Jwt:SigningKey debe tener mínimo {MinSigningKeyLength} caracteres para HS256. " +
-                        $"Actual: {options.SigningKey.Length}.");
+                        $"Actual: {signingKey.Length}.");
                 }
 
                 // Advertencia: Detectar clave de desarrollo
-                if (options.SigningKey.Contains(DevelopmentKeyPattern, StringComparison.OrdinalIgnoreCase))
+                if (signingKey is not null &&
+                    signingKey.Contains(DevelopmentKeyPattern, StringComparison.OrdinalIgnoreCase))
                 {
                     errors.Add($"⚠️  CRÍTICO: Estás usando una clave de DESARROLLO en Jwt:SigningKey. " +
                         $"Esta clave NO es segura para producción. Reemplázala con un valor único y secreto.");
@@ -147,14 +149,9 @@ public class JwtOptionsValidator : IValidateOptions<JwtOptions>
 /// Por ejemplo, usar HS256 en lugar de RS256/ES256 puede ser aceptable para
 /// desarrollo pero riesgoso para producción distribuida.
 /// </remarks>
-public class JwtProductionSecurityValidator : IValidateOptions<JwtOptions>
+public class JwtProductionSecurityValidator(string environment = "Production") : IValidateOptions<JwtOptions>
 {
-    private readonly string _environment;
-
-    public JwtProductionSecurityValidator(string environment = "Production")
-    {
-        _environment = environment;
-    }
+    private readonly string _environment = environment;
 
     /// <inheritdoc />
     public ValidateOptionsResult Validate(string? name, JwtOptions options)

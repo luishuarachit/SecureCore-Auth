@@ -23,16 +23,10 @@ public class FacebookOAuthOptions
 /// Facebook NO usa OIDC nativamente en su flujo estándar, por lo que usamos OAuth 2.0 puro.
 /// Implementamos 'appsecret_proof' para asegurar las llamadas de servidor a servidor.
 /// </summary>
-public class FacebookOAuthValidator : IOAuthProviderValidator
+public class FacebookOAuthValidator(FacebookOAuthOptions options, HttpClient httpClient) : IOAuthProviderValidator
 {
-    private readonly FacebookOAuthOptions _options;
-    private readonly HttpClient _httpClient;
-
-    public FacebookOAuthValidator(FacebookOAuthOptions options, HttpClient httpClient)
-    {
-        _options = options;
-        _httpClient = httpClient;
-    }
+    private readonly FacebookOAuthOptions _options = options;
+    private readonly HttpClient _httpClient = httpClient;
 
     public string ProviderName => "Facebook";
 

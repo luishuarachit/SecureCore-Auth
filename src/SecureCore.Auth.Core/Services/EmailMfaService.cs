@@ -24,21 +24,14 @@ namespace SecureCore.Auth.Core.Services;
 /// - El email incluye instrucciones claras para el usuario
 /// - El diseño es simple para evitar fugas de información
 /// </remarks>
-public sealed class EmailMfaService : IEmailMfaService
+public sealed class EmailMfaService(
+    IEmailService emailService,
+    IOptions<MfaOptions> options,
+    ILogger<EmailMfaService> logger) : IEmailMfaService
 {
-    private readonly IEmailService _emailService;
-    private readonly MfaOptions _options;
-    private readonly ILogger<EmailMfaService> _logger;
-
-    public EmailMfaService(
-        IEmailService emailService,
-        IOptions<MfaOptions> options,
-        ILogger<EmailMfaService> logger)
-    {
-        _emailService = emailService;
-        _options = options.Value;
-        _logger = logger;
-    }
+    private readonly IEmailService _emailService = emailService;
+    private readonly MfaOptions _options = options.Value;
+    private readonly ILogger<EmailMfaService> _logger = logger;
 
     public string GenerateCode(int length = 6)
     {

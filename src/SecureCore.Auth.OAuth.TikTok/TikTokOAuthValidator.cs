@@ -23,16 +23,10 @@ public class TikTokOAuthOptions
 /// TikTok tiene un manejo de errores particular: a veces devuelve 200 OK 
 /// pero con un cuerpo JSON que indica un error interno. Este validador maneja esa lógica.
 /// </summary>
-public class TikTokOAuthValidator : IOAuthProviderValidator
+public class TikTokOAuthValidator(TikTokOAuthOptions options, HttpClient httpClient) : IOAuthProviderValidator
 {
-    private readonly TikTokOAuthOptions _options;
-    private readonly HttpClient _httpClient;
-
-    public TikTokOAuthValidator(TikTokOAuthOptions options, HttpClient httpClient)
-    {
-        _options = options;
-        _httpClient = httpClient;
-    }
+    private readonly TikTokOAuthOptions _options = options;
+    private readonly HttpClient _httpClient = httpClient;
 
     public string ProviderName => "TikTok";
 

@@ -23,21 +23,15 @@ public class GitHubOAuthOptions
 /// GitHub usa un flujo OAuth 2.0 tradicional. Requiere un paso adicional 
 /// para obtener el email si el usuario lo tiene configurado como privado.
 /// </summary>
-public class GitHubOAuthValidator : IOAuthProviderValidator
+public class GitHubOAuthValidator(GitHubOAuthOptions options, HttpClient httpClient) : IOAuthProviderValidator
 {
-    private readonly GitHubOAuthOptions _options;
-    private readonly HttpClient _httpClient;
+    private readonly GitHubOAuthOptions _options = options;
+    private readonly HttpClient _httpClient = httpClient;
 
     private const string AuthorizationEndpoint = "https://github.com/login/oauth/authorize";
     private const string TokenEndpoint = "https://github.com/login/oauth/access_token";
     private const string UserEndpoint = "https://api.github.com/user";
     private const string EmailsEndpoint = "https://api.github.com/user/emails";
-
-    public GitHubOAuthValidator(GitHubOAuthOptions options, HttpClient httpClient)
-    {
-        _options = options;
-        _httpClient = httpClient;
-    }
 
     public string ProviderName => "GitHub";
 

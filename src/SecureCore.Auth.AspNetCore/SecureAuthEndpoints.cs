@@ -1,4 +1,5 @@
 using System.ComponentModel.DataAnnotations;
+using System.IdentityModel.Tokens.Jwt;
 using System.Text.Json;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -226,6 +227,25 @@ public static class SecureAuthEndpoints
 
             // Logout normal si el token pertenece al usuario autenticado
             await session.LogoutAsync(request.RefreshToken, ct);
+
+            // DIDÁCTICA (A-24): blacklist OPT-IN del access token actual. El logout de sesión
+            // individual NO rota el SecurityStamp, por lo que el access token seguiría válido
+            // hasta expirar. Si el host registró un ITokenBlacklist real, el jti del access token
+            // se revoca con TTL = vida restante; con el default NoOpTokenBlacklist es un no-op.
+            var blacklist = context.RequestServices.GetService<ITokenBlacklist>();
+            var accessTokenInfo = TryReadAccessTokenJti(context.Request.Headers.Authorization.ToString());
+            if (blacklist is not null && accessTokenInfo is not null &&
+                !string.IsNullOrEmpty(accessTokenInfo.Value.Jti))
+            {
+                var remaining = accessTokenInfo.Value.ValidTo is { } validTo && validTo > DateTime.UtcNow
+                    ? validTo - DateTime.UtcNow
+                    : TimeSpan.Zero;
+                if (remaining > TimeSpan.Zero)
+                {
+                    await blacklist.AddAsync(accessTokenInfo.Value.Jti, remaining, ct);
+                }
+            }
+
             return Results.Ok(new { message = "Sesión cerrada exitosamente." });
         })
         .WithName("Logout")
@@ -762,6 +782,36 @@ public static class SecureAuthEndpoints
         }
 
         return await next(context);
+    }
+
+    /// <summary>
+    /// Extrae el jti y la expiración de un access token del header Authorization (A-24).
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: se usa <c>ReadJwtToken</c> (parseo SIN validación de firma/vida) solo para
+    /// obtener el <c>jti</c> y el <c>ValidTo</c> en el logout; la validación real ya la hizo el
+    /// middleware JWT al autenticar la request. Tokens malformados o ausentes → null (sin
+    /// excepción). El TTL de blacklist se acota a la vida restante del token.
+    /// </remarks>
+    private static (string Jti, DateTime? ValidTo)? TryReadAccessTokenJti(string? authorizationHeader)
+    {
+        if (string.IsNullOrWhiteSpace(authorizationHeader) ||
+            !authorizationHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        try
+        {
+            var token = new JwtSecurityTokenHandler().ReadJwtToken(
+                authorizationHeader["Bearer ".Length..].Trim());
+            var jti = token.Id;
+            return string.IsNullOrEmpty(jti) ? null : (jti, token.ValidTo);
+        }
+        catch (ArgumentException)
+        {
+            return null;
+        }
     }
 }
 

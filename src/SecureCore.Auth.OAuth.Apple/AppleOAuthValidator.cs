@@ -27,10 +27,10 @@ namespace SecureCore.Auth.OAuth.Apple;
 /// 3. Apple envía el authorization code vía HTTP POST (form_post), no GET.
 /// 4. El nombre del usuario solo llega en el PRIMER inicio de sesión.
 /// </summary>
-public class AppleOAuthValidator : IOAuthProviderValidator
+public class AppleOAuthValidator(AppleOAuthOptions options, HttpClient httpClient) : IOAuthProviderValidator
 {
-    private readonly AppleOAuthOptions _options;
-    private readonly HttpClient _httpClient;
+    private readonly AppleOAuthOptions _options = options;
+    private readonly HttpClient _httpClient = httpClient;
     private readonly JwtSecurityTokenHandler _tokenHandler = new();
 
     private static Lazy<Task<JsonWebKeySet>>? _jwksRefreshTask;
@@ -41,12 +41,6 @@ public class AppleOAuthValidator : IOAuthProviderValidator
     private const string JwksUri = "https://appleid.apple.com/auth/keys";
     private const string TokenEndpoint = "https://appleid.apple.com/auth/token";
     private const string Issuer = "https://appleid.apple.com";
-
-    public AppleOAuthValidator(AppleOAuthOptions options, HttpClient httpClient)
-    {
-        _options = options;
-        _httpClient = httpClient;
-    }
 
     public string ProviderName => "Apple";
 
@@ -111,7 +105,7 @@ public class AppleOAuthValidator : IOAuthProviderValidator
 
             // Si Apple indica que nonce_supported es false, no validamos el nonce
             // (Apple no lo procesó). Solo validamos si está presente o supported == true.
-            bool shouldValidateNonce = nonceSupported is null ||
+            var shouldValidateNonce = nonceSupported is null ||
                                        nonceSupported.Equals("true", StringComparison.OrdinalIgnoreCase);
 
             if (shouldValidateNonce)
@@ -128,7 +122,7 @@ public class AppleOAuthValidator : IOAuthProviderValidator
         // Apple codifica email_verified como booleano JSON real en algunos flujos
         // y como string "true"/"false" en otros. Manejamos ambos casos.
         var emailVerifiedClaim = OAuthClaimHelper.GetClaim(jwt, "email_verified");
-        bool emailVerified = emailVerifiedClaim?.Equals("true", StringComparison.OrdinalIgnoreCase) == true;
+        var emailVerified = emailVerifiedClaim?.Equals("true", StringComparison.OrdinalIgnoreCase) == true;
 
         // Validar que sub no sea nulo — es el identificador único del usuario
         var providerKey = OAuthClaimHelper.GetClaim(jwt, "sub");

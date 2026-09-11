@@ -49,19 +49,14 @@ namespace SecureCore.Auth.Core.Services;
 /// The lock key is typically the token family ID, ensuring that only one
 /// request can rotate tokens for a specific user's session at a time.
 /// </remarks>
-public sealed class InMemoryOperationLock : IOperationLock
+/// <remarks>
+/// Creates a new InMemoryOperationLock with the specified default timeout.
+/// </remarks>
+/// <param name="defaultTimeout">Default timeout for lock acquisition (default: 5 seconds).</param>
+public sealed class InMemoryOperationLock(TimeSpan? defaultTimeout = null) : IOperationLock
 {
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _locks = new();
-    private readonly TimeSpan _defaultTimeout;
-
-    /// <summary>
-    /// Creates a new InMemoryOperationLock with the specified default timeout.
-    /// </summary>
-    /// <param name="defaultTimeout">Default timeout for lock acquisition (default: 5 seconds).</param>
-    public InMemoryOperationLock(TimeSpan? defaultTimeout = null)
-    {
-        _defaultTimeout = defaultTimeout ?? TimeSpan.FromSeconds(5);
-    }
+    private readonly TimeSpan _defaultTimeout = defaultTimeout ?? TimeSpan.FromSeconds(5);
 
     /// <inheritdoc />
     public async Task<IDisposable> AcquireAsync(
@@ -88,15 +83,10 @@ public sealed class InMemoryOperationLock : IOperationLock
     /// <summary>
     /// Releases the semaphore when disposed, allowing the next waiting thread to acquire the lock.
     /// </summary>
-    private sealed class LockReleaser : IDisposable
+    private sealed class LockReleaser(SemaphoreSlim semaphore) : IDisposable
     {
-        private readonly SemaphoreSlim _semaphore;
+        private readonly SemaphoreSlim _semaphore = semaphore;
         private bool _disposed;
-
-        public LockReleaser(SemaphoreSlim semaphore)
-        {
-            _semaphore = semaphore;
-        }
 
         public void Dispose()
         {

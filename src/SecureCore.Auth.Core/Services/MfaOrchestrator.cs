@@ -32,20 +32,32 @@ namespace SecureCore.Auth.Core.Services;
 /// 1. SignInWithPasswordAsync: Si requiere MFA, retorna mfaSessionToken
 /// 2. CompleteMfaLoginAsync: Verifica código MFA, genera tokens de acceso
 /// </remarks>
-public sealed class MfaOrchestrator : IMfaService
+public sealed class MfaOrchestrator(
+    IUserStore userStore,
+    ITotpService totpService,
+    IEmailMfaService emailMfaService,
+    IMfaCodeStore mfaCodeStore,
+    IMfaSessionStore mfaSessionStore,
+    IPasswordHasher passwordHasher,
+    IMfaEncryptionService encryptionService,
+    IAuthEventDispatcher eventDispatcher,
+    IOptions<MfaOptions> options,
+    ILogger<MfaOrchestrator> logger,
+    IAccountProtectionService? accountProtectionService = null,
+    IOptions<AccountProtectionOptions>? accountProtectionOptions = null) : IMfaService
 {
-    private readonly IUserStore _userStore;
-    private readonly ITotpService _totpService;
-    private readonly IEmailMfaService _emailMfaService;
-    private readonly IMfaCodeStore _mfaCodeStore;
-    private readonly IMfaSessionStore _mfaSessionStore;
-    private readonly IPasswordHasher _passwordHasher;
-    private readonly IMfaEncryptionService _encryptionService;
-    private readonly IAuthEventDispatcher _eventDispatcher;
-    private readonly MfaOptions _options;
-    private readonly ILogger<MfaOrchestrator> _logger;
-    private readonly IAccountProtectionService? _accountProtection;
-    private readonly AccountProtectionOptions? _accountProtectionOptions;
+    private readonly IUserStore _userStore = userStore;
+    private readonly ITotpService _totpService = totpService;
+    private readonly IEmailMfaService _emailMfaService = emailMfaService;
+    private readonly IMfaCodeStore _mfaCodeStore = mfaCodeStore;
+    private readonly IMfaSessionStore _mfaSessionStore = mfaSessionStore;
+    private readonly IPasswordHasher _passwordHasher = passwordHasher;
+    private readonly IMfaEncryptionService _encryptionService = encryptionService;
+    private readonly IAuthEventDispatcher _eventDispatcher = eventDispatcher;
+    private readonly MfaOptions _options = options.Value;
+    private readonly ILogger<MfaOrchestrator> _logger = logger;
+    private readonly IAccountProtectionService? _accountProtection = accountProtectionService;
+    private readonly AccountProtectionOptions? _accountProtectionOptions = accountProtectionOptions?.Value;
 
     /// <summary>
     /// Ventana de tolerancia TOTP (±1 paso de 30s = 60s) durante la cual un código
@@ -58,34 +70,6 @@ public sealed class MfaOrchestrator : IMfaService
     /// </summary>
     private bool AccountProtectionEnabled =>
         _accountProtection is not null && _accountProtectionOptions is { Enabled: true };
-
-    public MfaOrchestrator(
-        IUserStore userStore,
-        ITotpService totpService,
-        IEmailMfaService emailMfaService,
-        IMfaCodeStore mfaCodeStore,
-        IMfaSessionStore mfaSessionStore,
-        IPasswordHasher passwordHasher,
-        IMfaEncryptionService encryptionService,
-        IAuthEventDispatcher eventDispatcher,
-        IOptions<MfaOptions> options,
-        ILogger<MfaOrchestrator> logger,
-        IAccountProtectionService? accountProtectionService = null,
-        IOptions<AccountProtectionOptions>? accountProtectionOptions = null)
-    {
-        _userStore = userStore;
-        _totpService = totpService;
-        _emailMfaService = emailMfaService;
-        _mfaCodeStore = mfaCodeStore;
-        _mfaSessionStore = mfaSessionStore;
-        _passwordHasher = passwordHasher;
-        _encryptionService = encryptionService;
-        _eventDispatcher = eventDispatcher;
-        _options = options.Value;
-        _logger = logger;
-        _accountProtection = accountProtectionService;
-        _accountProtectionOptions = accountProtectionOptions?.Value;
-    }
 
     public async Task<MfaEnrollmentResponse> StartEnrollmentAsync(
         string userId,

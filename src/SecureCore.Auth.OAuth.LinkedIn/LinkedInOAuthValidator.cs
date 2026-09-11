@@ -26,10 +26,10 @@ public class LinkedInOAuthOptions
 /// LinkedIn ha migrado recientemente a OpenID Connect (OIDC) para la autenticación de usuarios,
 /// lo que permite una validación criptográfica más robusta mediante ID Tokens.
 /// </summary>
-public class LinkedInOAuthValidator : IOAuthProviderValidator
+public class LinkedInOAuthValidator(LinkedInOAuthOptions options, HttpClient httpClient) : IOAuthProviderValidator
 {
-    private readonly LinkedInOAuthOptions _options;
-    private readonly HttpClient _httpClient;
+    private readonly LinkedInOAuthOptions _options = options;
+    private readonly HttpClient _httpClient = httpClient;
     private readonly JwtSecurityTokenHandler _tokenHandler = new();
 
     private static Lazy<Task<JsonWebKeySet>>? _jwksRefreshTask;
@@ -40,12 +40,6 @@ public class LinkedInOAuthValidator : IOAuthProviderValidator
     private const string JwksUri = "https://www.linkedin.com/oauth/openid/jwks";
     private const string TokenEndpoint = "https://www.linkedin.com/oauth/v2/accessToken";
     private const string AuthorizeEndpoint = "https://www.linkedin.com/oauth/v2/authorization";
-
-    public LinkedInOAuthValidator(LinkedInOAuthOptions options, HttpClient httpClient)
-    {
-        _options = options;
-        _httpClient = httpClient;
-    }
 
     public string ProviderName => "LinkedIn";
 
