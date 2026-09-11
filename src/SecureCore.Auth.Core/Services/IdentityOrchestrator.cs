@@ -36,10 +36,20 @@ public sealed class IdentityOrchestrator(
     IOptions<MfaOptions> mfaOptions,
     IMfaSessionStore mfaSessionStore,
     IMfaService mfaService,
-    ILogger<IdentityOrchestrator> logger)
+    ILogger<IdentityOrchestrator> logger,
+    IAccountProtectionService? accountProtectionService = null,
+    IOptions<AccountProtectionOptions>? accountProtectionOptions = null)
 {
     private readonly SecureAuthOptions _options = options.Value;
     private readonly MfaOptions _mfaOptions = mfaOptions.Value;
+    private readonly IAccountProtectionService? _accountProtection = accountProtectionService;
+    private readonly AccountProtectionOptions? _accountProtectionOptions = accountProtectionOptions?.Value;
+
+    /// <summary>
+    /// true cuando el subsistema S1 está registrado Y habilitado (opt-in, D-03).
+    /// </summary>
+    private bool AccountProtectionEnabled =>
+        _accountProtection is not null && _accountProtectionOptions is { Enabled: true };
 
     /// <summary>
     /// Intenta autenticar un usuario con email y contraseña.
@@ -85,17 +95,69 @@ public sealed class IdentityOrchestrator(
             return (SignInResult.LockedOut, null, null);
         }
 
+        // DIDÁCTICA (S1): Anti-abuso por cuenta — scope Password. Cuando el subsistema está
+        // registrado y habilitado, reemplaza el contador en DB (IncrementFailedAccessCountAsync +
+        // HandleFailedAttemptAsync) por estado in-memory/distribuido SIN tocar la base de datos.
+        // El check de LockoutManager se conserva siempre (cubre lockouts administrativos y legacy).
+        if (AccountProtectionEnabled)
+        {
+            var protectionCheck = await _accountProtection!.CheckAsync(AccountProtectionScope.Password, user.Id, cancellationToken);
+            if (!protectionCheck.Allowed)
+            {
+                logger.LogWarning("Intento de login en cuenta bloqueada por anti-abuso (nivel {Level}): {UserId}",
+                    protectionCheck.EscalationLevel, user.Id);
+                await eventDispatcher.DispatchAsync(new AuthEvent
+                {
+                    EventType = AuthEventType.AccountLockedOut,
+                    UserId = user.Id,
+                    Metadata = new Dictionary<string, string> { ["reason"] = "account_protection_lock", ["scope"] = "password" }
+                }, cancellationToken);
+
+                return (SignInResult.LockedOut, null, null);
+            }
+        }
+
         var verificationResult = passwordHasher.VerifyPassword(user.PasswordHash, password);
 
         if (verificationResult == PasswordVerificationResult.Failed)
         {
-            var failedCount = await userStore.IncrementFailedAccessCountAsync(
-                user.Id, cancellationToken);
+            // DIDÁCTICA (S1): se registra el fallo en el subsistema. Si este fallo dispara el
+            // lockout (alcanza el máximo del scope), se responde LockedOut y se emite el evento
+            // AccountLockedOut exactamente cuando se activa el bloqueo.
+            if (AccountProtectionEnabled)
+            {
+                await _accountProtection!.RecordFailureAsync(AccountProtectionScope.Password, user.Id, cancellationToken);
 
-            await lockoutManager.HandleFailedAttemptAsync(user.Id, failedCount, cancellationToken);
+                var protectionCheck = await _accountProtection.CheckAsync(AccountProtectionScope.Password, user.Id, cancellationToken);
+                if (!protectionCheck.Allowed)
+                {
+                    logger.LogWarning("Cuenta {UserId} bloqueada por anti-abuso (contraseña, nivel {Level})",
+                        user.Id, protectionCheck.EscalationLevel);
+                    await eventDispatcher.DispatchAsync(new AuthEvent
+                    {
+                        EventType = AuthEventType.AccountLockedOut,
+                        UserId = user.Id,
+                        Metadata = new Dictionary<string, string>
+                        {
+                            ["reason"] = "lock_triggered",
+                            ["scope"] = "password",
+                            ["level"] = protectionCheck.EscalationLevel.ToString()
+                        }
+                    }, cancellationToken);
 
-            logger.LogDebug("Contraseña incorrecta para usuario {UserId}. Intentos fallidos: {Count}",
-                user.Id, failedCount);
+                    return (SignInResult.LockedOut, null, null);
+                }
+            }
+            else
+            {
+                var failedCount = await userStore.IncrementFailedAccessCountAsync(
+                    user.Id, cancellationToken);
+
+                await lockoutManager.HandleFailedAttemptAsync(user.Id, failedCount, cancellationToken);
+
+                logger.LogDebug("Contraseña incorrecta para usuario {UserId}. Intentos fallidos: {Count}",
+                    user.Id, failedCount);
+            }
 
             await eventDispatcher.DispatchAsync(new AuthEvent
             {
@@ -103,7 +165,9 @@ public sealed class IdentityOrchestrator(
                 UserId = user.Id,
                 Metadata = new Dictionary<string, string>
                 {
-                    ["failedCount"] = failedCount.ToString()
+                    ["failedCount"] = AccountProtectionEnabled
+                        ? (await _accountProtection!.CheckAsync(AccountProtectionScope.Password, user.Id, cancellationToken)).RemainingAttempts.ToString()
+                        : "0"
                 }
             }, cancellationToken);
 
@@ -114,6 +178,13 @@ public sealed class IdentityOrchestrator(
 
         if (requiresMfa)
         {
+            // DIDÁCTICA (S1): la contraseña fue correcta → reset del scope Password, aunque el
+            // login siga pendiente de MFA (el factor que podría bloquearse es MfaLogin).
+            if (AccountProtectionEnabled)
+            {
+                await _accountProtection!.RecordSuccessAsync(AccountProtectionScope.Password, user.Id, cancellationToken);
+            }
+
             var method = user.PreferredMfaMethod ?? "totp";
             var mfaToken = await mfaSessionStore.CreateMfaSessionTokenAsync(
                 user.Id, method, _mfaOptions.MfaSessionTokenMinutes, null, cancellationToken);
@@ -129,6 +200,12 @@ public sealed class IdentityOrchestrator(
         }
 
         await userStore.ResetFailedAccessCountAsync(user.Id, cancellationToken);
+
+        // DIDÁCTICA (S1): éxito total → reset del scope Password (limpieza del anti-abuso).
+        if (AccountProtectionEnabled)
+        {
+            await _accountProtection!.RecordSuccessAsync(AccountProtectionScope.Password, user.Id, cancellationToken);
+        }
 
         var tokens = await tokenService.GenerateTokenPairAsync(user, cancellationToken);
 

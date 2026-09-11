@@ -3,6 +3,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Logging;
+using SecureCore.Auth.Abstractions.Interfaces;
 using SecureCore.Auth.OAuth.Abstractions;
 
 namespace SecureCore.Auth.AspNetCore.Extensions;
@@ -15,23 +16,29 @@ namespace SecureCore.Auth.AspNetCore.Extensions;
 /// Cuando el callback de OAuth llega con un state, consumimos el entry para garantizar
 /// que ese state no pueda usarse una segunda vez.
 ///
-/// SEGURIDAD - TOCTOU:
-/// Este método usa GET + REMOVE (no atómico). La ventana TOCTOU es mínima (~1ms) y
-/// requeriría que un atacante coordinara dos requests exactamente en ese micro-intervalo.
+/// SEGURIDAD - TOCTOU (A-06):
+/// El ciclo de vida de cada state (escritura y consumo) delega en <see cref="ISingleUseTokenStore"/>
+/// (S2). Con la implementación por defecto (IDistributedCache) el consumo es GET + REMOVE NO
+/// atómico, con una ventana residual de ~1 ms. Para operación ATÓMICA (Redis GETDEL/Lua), registre
+/// una implementación propia de <see cref="ISingleUseTokenStore"/> en el contenedor DI ANTES de
+/// <c>AddSecureAuth()</c> (donde se registra el default con TryAddScoped); <c>DistributedCacheOAuthStateStore</c>
+/// la usa automáticamente para escribir y consumir, sin necesidad de reemplazar el IOAuthStateStore.
 ///
-/// Para operación ATÓMICA (Redis GETDEL), el implementador debe usar una implementación
-/// personalizada de IOAuthStateStore que acceda directamente a Redis via StackExchange.Redis.
-/// Esto está fuera del alcance de esta librería por no ser una dependencia requerida.
-/// El riesgo en la práctica es teórico y aceptable para la mayoría de aplicaciones.
+/// NOTA DE INTEGRACIÓN: la implementación registrada debe ser SIMÉTRICA (mismo backend y mismo
+/// formato de clave), pues "OAuthState_" se antepone al state y el flujo completo pasa por el SPI.
+///
+/// Si se construye SIN <see cref="ISingleUseTokenStore"/> (parámetro opcional null), se mantiene
+/// el comportamiento legado por IDistributedCache para no romper instanciaciones directas.
 ///
 /// BACKENDS SOPORTADOS:
 /// - MemoryDistributedCache (in-process)
 /// - SqlServerDistributedCache
-/// - Redis (con implementación personalizada)
+/// - Redis (con ISingleUseTokenStore distribuido)
 /// </remarks>
 public class DistributedCacheOAuthStateStore(
     IDistributedCache cache,
-    ILogger<DistributedCacheOAuthStateStore>? logger = null) : IOAuthStateStore
+    ILogger<DistributedCacheOAuthStateStore>? logger = null,
+    ISingleUseTokenStore? singleUseTokenStore = null) : IOAuthStateStore
 {
     private const string Prefix = "OAuthState_";
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -42,30 +49,53 @@ public class DistributedCacheOAuthStateStore(
 
     public async Task SaveAsync(string state, OAuthStateEntry entry, TimeSpan ttl, CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(entry);
+
         var key = SanitizeAndValidateKey(state);
 
+        // DIDÁCTICA (S2, A-06): El ciclo de vida completo (escritura y consumo) pasa por
+        // ISingleUseTokenStore cuando está inyectado, garantizando simetría independiente del
+        // backend subyacente (evita el split-brain de escribir por un camino y leer por otro).
         var json = JsonSerializer.Serialize(entry, JsonOptions);
-        var options = new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = ttl };
 
-        await cache.SetStringAsync(key, json, options, cancellationToken);
+        if (singleUseTokenStore is not null)
+        {
+            await singleUseTokenStore.SetAsync(key, json, ttl, cancellationToken);
+        }
+        else
+        {
+            var options = new DistributedCacheEntryOptions { AbsoluteExpirationRelativeToNow = ttl };
+            await cache.SetStringAsync(key, json, options, cancellationToken);
+        }
     }
 
     public async ValueTask<OAuthStateEntry?> ConsumeAsync(string state, CancellationToken cancellationToken = default)
     {
         var key = SanitizeAndValidateKey(state);
 
-        // DIDÁCTICA: Operación GET + REMOVE no atómica.
-        // La ventana TOCTOU es ~1ms. Para aplicaciones de alto riesgo,
-        // implementar una versión con Redis GETDEL directamente.
-        var json = await cache.GetStringAsync(key, cancellationToken);
+        // DIDÁCTICA (S2, A-06): El consumo delega en ISingleUseTokenStore (GETDEL atómico
+        // si el implementador la sobrescribe). Con el default de IDistributedCache la
+        // operación es GET + REMOVE no atómica (ventana TOCTOU ~1ms). Si no se inyectó un
+        // ISingleUseTokenStore, se conserva el camino legado para retrocompatibilidad.
+        string? json;
+        if (singleUseTokenStore is not null)
+        {
+            json = await singleUseTokenStore.GetAndRemoveAsync(key, cancellationToken);
+        }
+        else
+        {
+            json = await cache.GetStringAsync(key, cancellationToken);
+            if (json is not null)
+            {
+                await cache.RemoveAsync(key, cancellationToken);
+            }
+        }
 
         if (json is null)
         {
             logger?.LogWarning("OAuth state not found or expired - possible replay attack attempt: {Key}", key);
             return null;
         }
-
-        await cache.RemoveAsync(key, cancellationToken);
 
         try
         {

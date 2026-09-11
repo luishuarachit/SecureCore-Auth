@@ -190,6 +190,98 @@ public class SecureAuthBuilder(IServiceCollection services)
     }
 
     /// <summary>
+    /// Habilita el subsistema de anti-abuso por cuenta (S1): lockout multi-scope,
+    /// temporal y escalonado.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: Consolida el lockout por cuenta (contraseña, MFA, passkey, recovery,
+    /// verify-action) en un único subsistema distribuible por SPI. Opt-in (D-03): hasta
+    /// que <c>AccountProtectionOptions.Enabled = true</c>, los orquestadores conservan su
+    /// comportamiento actual (LockoutManager en DB / ventana MFA fija).
+    ///
+    /// Default in-memory (InMemoryAccountProtectionService): válido en single-instance.
+    /// En multi-instancia, registre su propia implementación de IAccountProtectionService
+    /// ANTES de esta llamada (TryAdd) con un store compartido (Redis INCR+EXPIRE, SQL…):
+    ///   services.AddScoped&lt;IAccountProtectionService, MyRedisAccountProtectionService&gt;();
+    /// También puede sobrescribir el default aquí registrando después de esta llamada.
+    ///
+    /// PRECEDENCIA (configuración): el configure por código aplicado aquí sobrescribe, en
+    /// bloque, las propiedades de la sección <c>SecureAuth:AccountProtection</c> de
+    /// appsettings (values del objeto <c>AccountProtectionOptions</c>, no solo las tocadas).
+    /// Si combina ambas, fije en configure TODAS las propiedades que quiera activas, o use
+    /// solo appsettings. La validación (Window &gt; 0, MaxLockDuration &gt; 0, duraciones &gt; 0)
+    /// ocurre al arrancar y NO es anulable.
+    /// </remarks>
+    /// <param name="configure">Acción opcional para sobrescribir las opciones por defecto.</param>
+    /// <returns>El builder para encadenamiento.</returns>
+    public SecureAuthBuilder AddSecureAuthAccountProtection(Action<AccountProtectionOptions>? configure = null)
+    {
+        Services.AddOptions<AccountProtectionOptions>()
+            .BindConfiguration(AccountProtectionOptions.SectionName)
+            .PostConfigure(opt =>
+            {
+                if (configure is not null)
+                {
+                    var overrides = new AccountProtectionOptions();
+                    configure(overrides);
+                    opt.Enabled = overrides.Enabled;
+                    opt.Window = overrides.Window;
+                    opt.MaxAttempts = overrides.MaxAttempts;
+                    opt.EscalationDurations = overrides.EscalationDurations;
+                    opt.MaxLockDuration = overrides.MaxLockDuration;
+                }
+            })
+            .Validate(options =>
+            {
+                if (options.Enabled && options.Window <= TimeSpan.Zero)
+                {
+                    throw new OptionsValidationException(
+                        nameof(AccountProtectionOptions),
+                        typeof(AccountProtectionOptions),
+                        ["AccountProtectionOptions.Window debe ser mayor que TimeSpan.Zero (una ventana de 0 revive el fail-open del lockout)."]);
+                }
+
+                if (options.Enabled && options.MaxLockDuration <= TimeSpan.Zero)
+                {
+                    throw new OptionsValidationException(
+                        nameof(AccountProtectionOptions),
+                        typeof(AccountProtectionOptions),
+                        ["AccountProtectionOptions.MaxLockDuration debe ser mayor que TimeSpan.Zero (una duración de 0 hace inofensivos los lockouts)."]);
+                }
+
+                if (options.Enabled && options.EscalationDurations.Count == 0)
+                {
+                    throw new OptionsValidationException(
+                        nameof(AccountProtectionOptions),
+                        typeof(AccountProtectionOptions),
+                        ["AccountProtectionOptions.EscalationDurations no puede estar vacío."]);
+                }
+
+                if (options.Enabled && options.EscalationDurations.Any(d => d <= TimeSpan.Zero))
+                {
+                    throw new OptionsValidationException(
+                        nameof(AccountProtectionOptions),
+                        typeof(AccountProtectionOptions),
+                        ["AccountProtectionOptions.EscalationDurations no puede contener duraciones menores o iguales a TimeSpan.Zero."]);
+                }
+
+                if (options.Enabled && options.MaxAttempts.Any(kvp => kvp.Value < 1))
+                {
+                    throw new OptionsValidationException(
+                        nameof(AccountProtectionOptions),
+                        typeof(AccountProtectionOptions),
+                        ["AccountProtectionOptions.MaxAttempts no puede contener valores menores que 1."]);
+                }
+
+                return true;
+            })
+            .ValidateOnStart();
+
+        Services.TryAddScoped<IAccountProtectionService, InMemoryAccountProtectionService>();
+        return this;
+    }
+
+    /// <summary>
     /// Registra una implementación por defecto de IEmailService si el consumidor
     /// no proporcionó la suya. NullEmailService lanza al intentar enviar.
     /// </summary>
@@ -389,6 +481,13 @@ public static class ServiceCollectionExtensions
         services.AddScoped<SessionOrchestrator>();
         services.AddScoped<SecurityStampValidator>();
         services.AddScoped<LockoutManager>();
+
+        // DIDÁCTICA (S2, A-06): Primitiva transversal "consumir exactamente una vez".
+        // Base para OAuth state (A-06), challenge WebAuthn (Fase 4) y recovery codes (Fase 5).
+        // Default con IDistributedCache (GET + REMOVE, no atómico). En multi-instancia,
+        // el implementador puede sobrescribirla con una implementación GETDEL/Lua distribuida:
+        //   services.AddScoped<ISingleUseTokenStore, MyRedisSingleUseTokenStore>();
+        services.TryAddScoped<ISingleUseTokenStore, DistributedCacheSingleUseTokenStore>();
 
         // Registrar el despachador de eventos con enriquecimiento de contexto HTTP
         services.TryAddSingleton<IHttpContextAccessor, HttpContextAccessor>();

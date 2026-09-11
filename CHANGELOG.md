@@ -14,15 +14,34 @@ y este proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.
 - **Aserción de passkeys con motivo distinguible (A-17)**: `PasskeyService.CompleteAssertionDetailedAsync` devuelve `PasskeyAssertionResult` (`User`, `CredentialFound`, `SignatureValid`). Un `Id` de credencial malformado (no Base64) ya no lanza excepción: se trata como credencial no encontrada.
 - **Estado de entrega del email de reset (A-09)**: `PasswordResetEntry.DeliveryState` (`Pending`/`Dispatched`/`Failed`) y miembro opcional (default interface member) `IPasswordResetStore.UpdateDeliveryStateAsync`. Las implementaciones existentes no se rompen: sin sobrescribirlo el estado queda en `Pending`.
 - **Rate limiting dedicado por IP en `/forgot-password`**: limiter keyed `"forgot-password"` configurable con `SecureAuthOptions.ForgotPasswordRateLimiter` (default: 5 solicitudes/hora). El throttling es **silencioso**: al superarse el límite se descarta la solicitud y se responde el mismo 200 ciego.
+- **Primitiva single-use atómica transversal (S2, Fase 1)**:
+  - `ISingleUseTokenStore` (SPI): `SetAsync` + `GetAndRemoveAsync` — el equivalente a GETDEL. Base del anti-replay para OAuth state (A-06), challenges WebAuthn (Fase 4) y recovery codes (Fase 5).
+  - `DistributedCacheSingleUseTokenStore` (default sobre `IDistributedCache`, GET + REMOVE no atómico con ventana residual `~1 ms` documentada). Para operación atómica en multi-instancia basta registrar una implementación sobre Redis GETDEL/Lua: `DistributedCacheOAuthStateStore` la consume automáticamente.
+  - `DistributedCacheOAuthStateStore` ahora delega en `ISingleUseTokenStore` el **ciclo de vida completo** (escritura y consumo) cuando está registrado; fallback legacy por `IDistributedCache` si no. No-breaking: `new DistributedCacheOAuthStateStore(cache)` sigue funcionando.
+  - Rechazo defensivo: `ttl <= 0` y `entry`/`value` nulos lanzan antes de tocar el almacén (evita entradas ya expiradas y escrituras vacías).
+- **Anti-abuso unificado por cuenta (S1, Fase 2)**:
+  - `IAccountProtectionService` (SPI) con scopes por factor y por acción (`Password`, `MfaLogin`, `Passkey`, `Recovery`, `VerifyAction`): `CheckAsync`, `RecordFailureAsync`, `RecordSuccessAsync`, `ResetAsync`, `ResetAllForUserAsync`, `AnyActiveLockAsync`.
+  - `InMemoryAccountProtectionService` (default): contadores por `(scope, cuenta)` con ventana deslizante (`Window`, default 5 min), lockouts escalonados (10 → 30 → 60 min → 24 h, techo `MaxLockDuration`) y expiración perezosa. El nivel de escalamiento se conserva entre episodios: el 2º bloqueo de una misma cuenta dura más que el 1º.
+  - Wiring (opt-in): `AddSecureAuthAccountProtection()` (default `Enabled: false`, principio D-03). Al activarlo, `IdentityOrchestrator.SignInWithPasswordAsync` (scope `Password`) y `MfaOrchestrator.VerifyAsync` (scope `MfaLogin`) integran el subsistema sin tocar el flujo legacy: sin registro, el comportamiento anterior permanece intacto.
+  - El fallo que dispara el lockout responde el mismo mensaje genérico que cualquier fallo (sin oráculo de cuándo se bloquea); el siguiente intento recibe el mensaje de bloqueo. Los presupuestos son independientes por factor: un ataque a MfA (5 intentos) no consume el presupuesto de contraseña. `MfaVerificationFailed` se publica en **cada** intento fallido (con la metadata `attempts` restantes, o el máximo cuando el fallo dispara el lockout).
+  - Configurable por sección `SecureAuth:AccountProtection` (`MaxAttempts` por scope: contraseña/MfA/passkey/verificación 5, recovery 3; `Window`; `EscalationDurations`; `MaxLockDuration`), con validación en arranque (`.Validate().ValidateOnStart()`): configuración inválida falla en startup en vez de degradarse a fail-open.
 
 ### Corregido
 - XML docs obsoletas de `MaxAuthRequestBodySize` y del filtro de endpoints: afirmaban que un endpoint filter rechazaba con 413 antes de deserializar; en Minimal APIs los filters se ejecutan **después** del binding. La protección real la aporta el middleware.
 - `PasskeyService.CompleteAssertionDetailedAsync` propagaba `FormatException`/`ArgumentNullException` (→ HTTP 500) ante un `Id` de credencial malformado: ahora retorna credencial no encontrada mediante `TryDecodeBase64CredentialId` (aplicado también en el ramo de fallo de firma).
+- Revisión de seguridad de S1 (hallazgos de la auditoría):
+  - `GetLockDuration` podía devolver una duración mayor que `MaxLockDuration` si la escala lo pedía: ahora se **clampa** al techo y, defensivamente, cualquier duración ≤ 0 o nivel fuera de rango cae en `MaxLockDuration`.
+  - `Window`/`MaxLockDuration` ≤ 0 (configuración directa sin validar) degradaban el lockout a inofensivo/fail-open: ahora `GetWindow()`/`GetMaxLockDuration()` usan fallback a los defaults (5 min / 24 h) y `AddSecureAuthAccountProtection` valida toda la configuración en startup.
+  - Transición al activar S1 con lockouts legacy en DB: `VerifyAsync` con S1 activo ahora respeta un `LockoutEnd` vigente dejado por el flujo legacy (fail-closed); la expiración auto-resetea el contador (auto-curación) y el flujo continúa.
+  - El `configure` de `AddSecureAuthAccountProtection` sobrescribe **en bloque** (todas las propiedades, no solo las indicadas) la sección appsettings: documentada la precedencia para evitar configuraciones mixtas accidentales.
 
 ### Seguridad
 - Throttling anti-abuso en `/forgot-password` sin exponer oráculo ni feedback de bloqueo (200 ciego).
+- **Mitigación del TOCTOU en OAuth state (A-06)**: el consumo queda abstraído tras `ISingleUseTokenStore` (S2), extensible a operación atómica GETDEL/Lua sin cambios en el flujo OAuth.
 - Documentado el riesgo de enumeración: no exponer al cliente la distinción `CredentialNotFound` vs `InvalidSignature` de las passkeys (`CredentialFound` es un oráculo necesario por diseño para lockout por cuenta).
 - Documentada la responsabilidad de limpieza periódica de tokens de reset expirados (`IPasswordResetStore.DeleteExpiredAsync`) y de tokens huérfanos Pending/Failed (A-09).
+- S1 (A-02/A-15/A-19): límite de intentos por cuenta y por factor con lockout escalonado. Los fallos durante un lockout activo se ignoran (no gastan presupuesto) y el conteo nunca ocurre sobre un estado bloqueado; el reset por éxito/no-restart queda restringido al scope correspondiente.
+- S1: configuración inválida falla en startup (`.Validate().ValidateOnStart()`); la duración de lockout queda acotada por `MaxLockDuration`; los lockouts legacy en DB se respetan durante la activación del subsistema (sin ventana de fail-open).
 
 ## [3.1.8] - 2026-08-01
 

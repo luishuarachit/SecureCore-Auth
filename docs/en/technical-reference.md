@@ -136,6 +136,41 @@ Defines the Multi-Factor Authentication policy.
 
 > **SECURITY NOTE**: Recovery codes reduce MFA security. If enabled, they must have HIGH ENTROPY (minimum 32 random characters) to resist brute-force attacks if the database is compromised.
 
+### 2.6. AccountProtectionOptions (v3.2.0, S1)
+Defines the **per-account abuse prevention** policy (attempt limits per factor). It is **opt-in**
+(default `Enabled = false`, principle D-03): without registering `AddSecureAuthAccountProtection()`
+the previous behavior remains intact.
+
+| Property | Type | Default Value | Validation / Note |
+| :--- | :--- | :--- | :--- |
+| `Enabled` | `bool` | false | Activates the S1 subsystem. |
+| `Window` | `TimeSpan` | 5 min | Sliding window: failures older than `Window` no longer count. |
+| `MaxAttempts` | `IReadOnlyDictionary<AccountProtectionScope, int>` | Password 5, MfaLogin 5, Passkey 5, Recovery 3, VerifyAction 5 | Per-factor/action limit. `GetMaxAttempts(scope)` falls back to 5 for unconfigured scopes. |
+| `EscalationDurations` | `IReadOnlyList<TimeSpan>` | [10 min, 30 min, 1 h, 24 h] | Lockout duration per escalation level. `GetLockDuration(level)` clamps within the list. |
+| `MaxLockDuration` | `TimeSpan` | 24 h | Hard cap: no lockout exceeds this duration. |
+
+Configuration section: `SecureAuth:AccountProtection`.
+
+```csharp
+services.AddSecureAuth(options => { options.AccountProtection.Enabled = true; /* or via appsettings */ });
+services.AddSecureAuthAccountProtection(o =>
+{
+    o.Enabled = true;
+    o.Window = TimeSpan.FromMinutes(10);
+});
+```
+
+> **DIDACTIC — Level escalation**: the level is kept between episodes while the process lives. If an
+> account gets locked (`Level 1` = 10 min), fails again, unlocks, and fails again, the second lockout
+> is `Level 2` (30 min). This progressively raises the cost of brute force without penalizing a single
+> accidental mistake.
+> **DIDACTIC — Per-factor scoping**: budgets are independent per `AccountProtectionScope`. An MFA
+> attack (5 attempts) does not consume the password budget, and vice versa.
+
+> **Security (audit)**: `AddSecureAuthAccountProtection()` validates the configuration at startup (`.Validate().ValidateOnStart()`): `Window > 0`, `MaxLockDuration > 0`, `EscalationDurations` non-empty with durations > 0 and `MaxAttempts ≥ 1`. Defensively, even **without validation** (direct service construction): `GetWindow()`/`GetMaxLockDuration()` fall back to the defaults (5 min / 24 h) on values ≤ 0, and `GetLockDuration(level)` clamps every duration to the `MaxLockDuration` cap while out-of-range levels / durations ≤ 0 resolve to `MaxLockDuration` — invalid configuration never downgrades the lockout to harmless/fail-open.
+>
+> **DIDACTIC — Configuration precedence**: the `configure` action of `AddSecureAuthAccountProtection(Action<AccountProtectionOptions>)` overrides the `SecureAuth:AccountProtection` section **as a whole** (all properties of the received object, not only the ones you set). To combine sources, set **all** active properties in `configure` or use appsettings only.
+
 ---
 
 ## 3. Infrastructure Interfaces (SPI)
@@ -175,8 +210,39 @@ Persistence for single-use tokens. Only the SHA-256 hash of the token is stored.
 - `Task UpdateDeliveryStateAsync(string tokenHash, PasswordResetDeliveryState state, CancellationToken ct)` (v3.2.0): **default interface member**. Override it to record whether the email was `Dispatched` or `Failed` (`PasswordResetEntry.DeliveryState`) for audit and cleanup of orphaned Pending/Failed tokens (A-09). Not overriding it breaks nothing: the state stays `Pending`.
 
 ### 3.4. IResetTokenMailer
-Interface for recovery notification dispatch.
+Interface for dispatching recovery notifications.
 - `Task SendResetEmailAsync(string email, string rawToken, CancellationToken ct)`
+
+### 3.5. ISingleUseTokenStore (v3.2.0, S2)
+Cross-cutting "consume exactly once" primitive (GETDEL equivalent). The foundation for
+**anti-replay** of OAuth state (A-06), WebAuthn challenges (Phase 4) and recovery codes (Phase 5).
+
+- `ValueTask SetAsync(string key, string value, TimeSpan ttl, CancellationToken ct)`
+- `ValueTask<string?> GetAndRemoveAsync(string key, CancellationToken ct)`
+
+**Distributed SPI contract**: `DistributedCacheOAuthStateStore` routes the **full lifecycle** of
+the state (write and consume) through this SPI when registered. The default implementation
+`DistributedCacheSingleUseTokenStore` uses IDistributedCache with GET + REMOVE (**non-atomic**,
+residual ~1 ms window). For atomic operation in multi-instance deployments, implement this contract
+over a backend that supports GETDEL/Lua (Redis) or another transactional mechanism — the store must
+be **symmetric** (same backend and key format) and registered **before `AddSecureAuth()`** (where
+the default is registered with `TryAddScoped`). Keys carry the caller's per-context prefix
+(e.g. `OAuthState_`).
+
+### 3.6. IAccountProtectionService (v3.2.0, S1)
+**Per-account, per-factor abuse prevention** service (A-02/A-15/A-19). Designed to be extensible
+(distributable) via a custom implementation over a shared backend; the default implementation is
+`InMemoryAccountProtectionService`.
+
+- `ValueTask<AccountProtectionResult> CheckAsync(AccountProtectionScope scope, string key, CancellationToken ct)` — current budget state for the factor.
+- `Task RecordFailureAsync(AccountProtectionScope scope, string key, CancellationToken ct)` — records a failure; reaching `MaxAttempts` triggers the escalating lockout.
+- `Task RecordSuccessAsync(AccountProtectionScope scope, string key, CancellationToken ct)` — successful verification: clears the scope budget.
+- `Task ResetAsync(AccountProtectionScope scope, string key, CancellationToken ct)` — releases only the given scope.
+- `Task ResetAllForUserAsync(string key, CancellationToken ct)` — releases every scope of the account (same `key`).
+- `ValueTask<bool> AnyActiveLockAsync(string key, CancellationToken ct)` — decide homogeneous responses without disclosing which factor is locked.
+
+`AccountProtectionResult` exposes `Allowed`, `RemainingAttempts`, `LockEnd` and `EscalationLevel`
+(see § 4.8 for the wiring).
 
 ---
 
@@ -338,6 +404,26 @@ Registration and assertion service for Passkeys (FIDO2/WebAuthn), enabling passw
 
 > **SECURITY** (v3.2.0): A malformed credential `Id` (not Base64) is treated as "credential not found" and never throws. `CredentialFound` is a credential-existence oracle — needed by design for per-account lockout — but **do not expose this distinction to the client**: always return the same generic authentication error.
 
+### 4.8. Per-account abuse prevention (S1, v3.2.0)
+Integration of `IAccountProtectionService` into the orchestrators. It is activated **only** via
+`AddSecureAuthAccountProtection()` (registers the service and binds `AccountProtectionOptions`
+from `SecureAuth:AccountProtection`). Without that registration, `IdentityOrchestrator` and
+`MfaOrchestrator` keep their legacy (DB-based lockout) policy unchanged.
+
+| Flow | Scope | Integration |
+| :--- | :--- | :--- |
+| `IdentityOrchestrator.SignInWithPasswordAsync` | `Password` | **Pre-check**: if `CheckAsync` denies, returns `SignInResult.LockedOut` with `AccountLockedOut (reason: account_protection_lock)`. **Wrong password**: `RecordFailureAsync`; when the lockout triggers, `LockedOut` + `AccountLockedOut (reason: lock_triggered, scope, level)`. **Success/RequiresMfa**: `RecordSuccessAsync` (scope reset). The legacy `LockoutManager` flow (admin/DB policy) is kept in parallel. |
+| `MfaOrchestrator.VerifyAsync` | `MfaLogin` | **Pre-check**: if the scope is locked → `"Demasiados intentos. Intente más tarde."`. **Failure**: `RecordFailureAsync`; the failure that triggers the lockout responds `"Código inválido"` (generic, no oracle about when it locks). **Success**: `RecordSuccessAsync`. Without S1, the legacy flow is kept (`IncrementMfaFailedAttemptsAsync` + `ApplyMfaLockoutIfNeededAsync` with `MaxVerificationAttempts`/`CodeRetryWindowMinutes`). |
+
+> **Legacy → S1 transition (fail-closed)**: when S1 is enabled, `VerifyAsync` honors a pending `LockoutEnd` left by the legacy DB flow: a user with `MfaFailedAttemptsCount >= MaxVerificationAttempts` and an active lockout is blocked even if the S1 window recorded no failures. Expiry self-resets (T9: `IsMfaLockedOutAsync` clears counter and lockout) and the flow continues — a historical lockout cannot veto the account forever.
+
+> **DIDACTIC — Per-attempt events**: with S1 enabled, `MfaVerificationFailed` is published on **every** failure: the `attempts` metadata reports the remaining attempts (budget still available) or `MaxAttempts` for the failure that triggers the lockout. Without S1 (legacy), the event was emitted only on the lockout-triggering failure.
+
+> **DIDACTIC — Escalating lockout**: `InMemoryAccountProtectionService` keeps `EscalationLevel`
+> between episodes; the 2nd lockout of the same account lasts 30 min (level 2), the 3rd 1 h, etc.
+> `LockEnd` is computed as `now + GetLockDuration(level)`, capped at `MaxLockDuration`.
+> Failures during an active lockout are **ignored** (they spend no budget and do not extend the lock).
+
 ---
 
 ## 5. Middleware and Integration Endpoints
@@ -433,11 +519,11 @@ Interface implemented by all provider validators.
 | **JWKS Caching + Auto-Retry** | Performance and resilience. | In-memory cache with `Lazy<Task>` (24h expiry) + auto-retry on `SecurityTokenSignatureKeyNotFoundException` or `SecurityTokenInvalidSignatureException`. The `Lazy<Task>` pattern avoids the bottleneck caused by `SemaphoreSlim(1,1)` under high concurrency. |
 | **AppSecret Proof** | Server-to-Server security. | HMAC-SHA256(AccessToken, ClientSecret) for Facebook. |
 | **Dynamic Issuer** | Multi-tenancy. | Prefix/regex validation in Microsoft Entra ID. |
-| **State Anti-Replay** | Prevents OAuth state reuse. | `ConsumeAsync` uses non-atomic GET + REMOVE. For high-risk apps, implement a version with Redis GETDEL. |
+| **State Anti-Replay** | Prevents OAuth state reuse. | `ConsumeAsync` delegates to `ISingleUseTokenStore` (§3.5) — overridable with an atomic implementation (Redis GETDEL/Lua). |
 
-> **SECURITY NOTE - OAuth State TOCTOU**: The `ConsumeAsync` method in `DistributedCacheOAuthStateStore` uses a non-atomic GET + REMOVE operation. The race condition window is ~1ms and would require exact coordination between two requests.
+> **SECURITY NOTE - OAuth State TOCTOU**: As of v3.2.0, `ConsumeAsync` in `DistributedCacheOAuthStateStore` delegates to the `ISingleUseTokenStore` SPI. The default implementation (`DistributedCacheSingleUseTokenStore`) uses non-atomic GET + REMOVE (~1 ms race window).
 >
-> For high-risk applications requiring atomic operation, implement your own `IOAuthVersion` using Redis with the GETDEL command. The risk in practice is minimal for most applications.
+> For high-risk applications requiring atomic operation, implement your own `ISingleUseTokenStore` using Redis with the GETDEL command (or an equivalent transactional operation); `DistributedCacheOAuthStateStore` will consume it automatically. The risk in practice is minimal for most applications.
 
 ### 7.3. Supported Providers
 

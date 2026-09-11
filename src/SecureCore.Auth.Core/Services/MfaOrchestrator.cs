@@ -44,12 +44,20 @@ public sealed class MfaOrchestrator : IMfaService
     private readonly IAuthEventDispatcher _eventDispatcher;
     private readonly MfaOptions _options;
     private readonly ILogger<MfaOrchestrator> _logger;
+    private readonly IAccountProtectionService? _accountProtection;
+    private readonly AccountProtectionOptions? _accountProtectionOptions;
 
     /// <summary>
     /// Ventana de tolerancia TOTP (±1 paso de 30s = 60s) durante la cual un código
     /// ya usado no puede reutilizarse en el enrollment.
     /// </summary>
     private const int TotpReuseWindowSeconds = 60;
+
+    /// <summary>
+    /// true cuando el subsistema S1 está registrado Y habilitado (opt-in, D-03).
+    /// </summary>
+    private bool AccountProtectionEnabled =>
+        _accountProtection is not null && _accountProtectionOptions is { Enabled: true };
 
     public MfaOrchestrator(
         IUserStore userStore,
@@ -61,7 +69,9 @@ public sealed class MfaOrchestrator : IMfaService
         IMfaEncryptionService encryptionService,
         IAuthEventDispatcher eventDispatcher,
         IOptions<MfaOptions> options,
-        ILogger<MfaOrchestrator> logger)
+        ILogger<MfaOrchestrator> logger,
+        IAccountProtectionService? accountProtectionService = null,
+        IOptions<AccountProtectionOptions>? accountProtectionOptions = null)
     {
         _userStore = userStore;
         _totpService = totpService;
@@ -73,6 +83,8 @@ public sealed class MfaOrchestrator : IMfaService
         _eventDispatcher = eventDispatcher;
         _options = options.Value;
         _logger = logger;
+        _accountProtection = accountProtectionService;
+        _accountProtectionOptions = accountProtectionOptions?.Value;
     }
 
     public async Task<MfaEnrollmentResponse> StartEnrollmentAsync(
@@ -310,7 +322,34 @@ public sealed class MfaOrchestrator : IMfaService
             return new MfaVerificationResult(false, "MFA no está activo", null);
         }
 
-        if (user.MfaFailedAttemptsCount >= _options.MaxVerificationAttempts)
+        // DIDÁCTICA (S1): Anti-abuso por cuenta — scope MfaLogin, escalonado. Si el subsistema
+        // está registrado y habilitado, reemplaza el contador en DB (T8/T9 con
+        // CodeRetryWindowMinutes fijo). El fallback legacy se conserva cuando no.
+        if (AccountProtectionEnabled)
+        {
+            var protectionCheck = await _accountProtection!.CheckAsync(AccountProtectionScope.MfaLogin, userId, cancellationToken);
+            if (!protectionCheck.Allowed)
+            {
+                _logger.LogWarning("Usuario {UserId} bloqueado por anti-abuso MFA (nivel {Level})",
+                    userId, protectionCheck.EscalationLevel);
+                return new MfaVerificationResult(false, "Demasiados intentos. Intente más tarde.", null);
+            }
+
+            // Transición legacy→S1: honorar un lockout en DB aún activo (fijado antes de habilitar
+            // S1 o por una instancia de una flota mixta). Se auto-resetea al expirar (T9), por lo
+            // que no puede bloquear para siempre; sin este control, habilitar S1 destraba cuentas
+            // que el legacy había bloqueado (fail-open de transición).
+            if (user.MfaFailedAttemptsCount >= _options.MaxVerificationAttempts)
+            {
+                var lockedOut = await IsMfaLockedOutAsync(user, userId, cancellationToken);
+                if (lockedOut)
+                {
+                    _logger.LogWarning("Usuario {UserId} bloqueado temporalmente por verificación MFA (transición legacy)", userId);
+                    return new MfaVerificationResult(false, "Demasiados intentos. Intente más tarde.", null);
+                }
+            }
+        }
+        else if (user.MfaFailedAttemptsCount >= _options.MaxVerificationAttempts)
         {
             // T8/T9 (P5): Lockout temporal (no permanente). Si la ventana expiró,
             // se resetea el contador y se permite reintentar.
@@ -356,23 +395,10 @@ public sealed class MfaOrchestrator : IMfaService
 
         if (!isValid)
         {
-            var newCount = await _userStore.IncrementMfaFailedAttemptsAsync(userId, cancellationToken);
-            _logger.LogWarning("Verificación MFA fallida para usuario {UserId}, intentos: {Count}", userId, newCount);
-
-            // T8 (P5): Bloquear temporalmente al alcanzar el máximo de intentos.
-            await ApplyMfaLockoutIfNeededAsync(newCount, userId, user.LockoutEnd, cancellationToken);
-
-            await _eventDispatcher.DispatchAsync(new Abstractions.Models.AuthEvent
-            {
-                EventType = Abstractions.Models.AuthEventType.MfaVerificationFailed,
-                UserId = userId,
-                Metadata = new Dictionary<string, string>
-                {
-                    ["method"] = method,
-                    ["attempts"] = newCount.ToString()
-                }
-            }, cancellationToken);
-
+            // DIDÁCTICA (S1): con anti-abuso habilitado se registra el fallo en el subsistema
+            // (scope MfaLogin, escalonado). Si este fallo dispara el lockout, se responde
+            // genéricamente sin enumeración. Sin S1 se conserva el flujo legacy T8/T9.
+            await RegisterMfaVerificationFailureAsync(user, userId, method, isProtectionEnabled: AccountProtectionEnabled, cancellationToken);
             return new MfaVerificationResult(false, "Código inválido", null);
         }
 
@@ -387,6 +413,12 @@ public sealed class MfaOrchestrator : IMfaService
         }
 
         await _userStore.ResetMfaFailedAttemptsAsync(userId, cancellationToken);
+
+        // DIDÁCTICA (S1): éxito → reset del scope MfaLogin (limpieza del anti-abuso).
+        if (AccountProtectionEnabled)
+        {
+            await _accountProtection!.RecordSuccessAsync(AccountProtectionScope.MfaLogin, userId, cancellationToken);
+        }
 
         _logger.LogInformation("Verificación MFA exitosa para usuario {UserId}, método: {Method}", userId, method);
 
@@ -535,6 +567,75 @@ public sealed class MfaOrchestrator : IMfaService
     private static string GetTotpUsedCodeKey(string userId)
     {
         return $"mfa_totp_used_code:{userId}";
+    }
+
+    /// <summary>
+    /// Registra un fallo de verificación MFA. Con S1 habilitado usa el subsistema de
+    /// anti-abuso (scope MfaLogin, escalonado); sin S1 conserva el flujo legacy T8/T9
+    /// (contador en DB + bloqueo con CodeRetryWindowMinutes).
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: Cuando el fallo activa un lockout (alcanza el máximo del scope) no se
+    /// informa al cliente de otra forma que el mensaje genérico "Código inválido" (el
+    /// siguiente intento verá el bloqueo). Esto evita dar feedback de cuándo se bloquea
+    /// la cuenta. El evento MfaVerificationFailed se emite en CADA intento fallido en
+    /// ambos caminos (paridad de auditoría con el legacy).
+    /// </remarks>
+    private async Task RegisterMfaVerificationFailureAsync(
+        UserIdentity user,
+        string userId,
+        string method,
+        bool isProtectionEnabled,
+        CancellationToken cancellationToken)
+    {
+        if (isProtectionEnabled)
+        {
+            await _accountProtection!.RecordFailureAsync(AccountProtectionScope.MfaLogin, userId, cancellationToken);
+
+            var protectionCheck = await _accountProtection.CheckAsync(AccountProtectionScope.MfaLogin, userId, cancellationToken);
+
+            // Paridad de auditoría con el legacy: un evento por intento fallido. Cuando el
+            // fallo dispara el lockout (RemainingAttempts == 0) se registra el máximo.
+            await _eventDispatcher.DispatchAsync(new Abstractions.Models.AuthEvent
+            {
+                EventType = Abstractions.Models.AuthEventType.MfaVerificationFailed,
+                UserId = userId,
+                Metadata = new Dictionary<string, string>
+                {
+                    ["method"] = method,
+                    ["attempts"] = protectionCheck.Allowed
+                        ? protectionCheck.RemainingAttempts.ToString()
+                        : _options.MaxVerificationAttempts.ToString()
+                }
+            }, cancellationToken);
+
+            if (protectionCheck.Allowed)
+            {
+                return;
+            }
+
+            _logger.LogWarning("Usuario {UserId} bloqueado por anti-abuso MFA tras exceder intentos (nivel {Level})",
+                userId, protectionCheck.EscalationLevel);
+
+            return;
+        }
+
+        var newCount = await _userStore.IncrementMfaFailedAttemptsAsync(userId, cancellationToken);
+        _logger.LogWarning("Verificación MFA fallida para usuario {UserId}, intentos: {Count}", userId, newCount);
+
+        // T8 (P5): Bloquear temporalmente al alcanzar el máximo de intentos.
+        await ApplyMfaLockoutIfNeededAsync(newCount, userId, user.LockoutEnd, cancellationToken);
+
+        await _eventDispatcher.DispatchAsync(new Abstractions.Models.AuthEvent
+        {
+            EventType = Abstractions.Models.AuthEventType.MfaVerificationFailed,
+            UserId = userId,
+            Metadata = new Dictionary<string, string>
+            {
+                ["method"] = method,
+                ["attempts"] = newCount.ToString()
+            }
+        }, cancellationToken);
     }
 
     /// <summary>
