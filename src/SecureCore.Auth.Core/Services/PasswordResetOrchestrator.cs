@@ -79,7 +79,8 @@ public sealed class PasswordResetOrchestrator(
         {
             TokenHash = tokenHash,
             UserId = user.Id,
-            ExpiresAtUtc = DateTime.UtcNow.AddMinutes(_options.TokenLifetimeMinutes)
+            ExpiresAtUtc = DateTime.UtcNow.AddMinutes(_options.TokenLifetimeMinutes),
+            DeliveryState = PasswordResetDeliveryState.Pending
         };
 
         await passwordResetStore.StoreAsync(entry, cancellationToken);
@@ -93,7 +94,38 @@ public sealed class PasswordResetOrchestrator(
 
         // 7. Enviar la notificación por email
         logger.LogInformation("Enviando token de reseteo a Email vinculado para el usuario {UserId}", user.Id);
-        await resetTokenMailer.SendResetEmailAsync(email, rawToken, cancellationToken);
+        try
+        {
+            await resetTokenMailer.SendResetEmailAsync(email, rawToken, cancellationToken);
+
+            // DIDÁCTICA: Marcamos el token como entregado. Si el store no soporta el
+            // estado (default interface member), la actualización es un no-op y el token
+            // permanece como Pending sin romper el flujo (ver IPasswordResetStore).
+            await passwordResetStore.UpdateDeliveryStateAsync(
+                tokenHash, PasswordResetDeliveryState.Dispatched, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            // DIDÁCTICA: NO eliminamos el token. Dejamos el flujo de reintento intacto y
+            // marcamos el envío como fallido para auditoría y limpieza de tokens huérfanos.
+            logger.LogError(
+                ex,
+                "Falló el envío del email de reseteo para el usuario {UserId}. El token queda persistido marcado como Failed.",
+                user.Id);
+
+            try
+            {
+                await passwordResetStore.UpdateDeliveryStateAsync(
+                    tokenHash, PasswordResetDeliveryState.Failed, cancellationToken);
+            }
+            catch (Exception stateEx)
+            {
+                logger.LogWarning(
+                    stateEx,
+                    "No se pudo registrar el estado de entrega del token de reseteo para el usuario {UserId}",
+                    user.Id);
+            }
+        }
 
         return true;
     }

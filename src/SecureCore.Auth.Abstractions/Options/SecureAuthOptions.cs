@@ -250,6 +250,58 @@ public class SecureAuthOptions
     public RateLimiterOptions RateLimiter { get; set; } = new();
 
     /// <summary>
+    /// Configuración del rate limiting por IP para el endpoint anónimo de /forgot-password.
+    /// Por defecto: 5 solicitudes por hora por IP.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA (Nº5): /forgot-password es un endpoint anónimo (sin autenticación), vector
+    /// clásico de abuso: enumeración masiva de emails, bombardeo de correos de reset y
+    /// costes de almacenamiento. El throttling aquí debe ser SILENCIOSO: al superarse el
+    /// límite el endpoint sigue devolviendo el 200 ciego habitual, sin 429 ni mensajes
+    /// distintos, para no dar al atacante feedback sobre cuándo se le limita ni abrir un
+    /// oráculo adicional.
+    ///
+    /// Se implementa con un limiter dedicado (keyed DI "forgot-password") para NO compartir
+    /// el presupuesto con el de login. Al igual que <see cref="RateLimiter"/>, la
+    /// implementación por defecto (InMemory) funciona en single-instance; en arquitecturas
+    /// distribuidas reemplázala por una implementación con Redis u otro store:
+    /// <code>
+    /// services.AddKeyedSingleton&lt;IRateLimiter&gt;("forgot-password",
+    ///     (sp, _) =&gt; new RedisRateLimiter(...));
+    /// </code>
+    /// </remarks>
+    public RateLimiterOptions? ForgotPasswordRateLimiter { get; set; } =
+        new() { MaxAttempts = 5, Window = TimeSpan.FromHours(1) };
+
+    /// <summary>
+    /// Límite máximo (en bytes) del cuerpo de las solicitudes a los endpoints de
+    /// autenticación anónimos (login, refresh, forgot-password, reset-password).
+    /// Por defecto: 2048 bytes (2 KB).
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: Los endpoints de autenticación son objetivos comunes de ataques DoS
+    /// mediante payloads enormes. Casi ninguna solicitud legítima supera 1 KB
+    /// (email + contraseña + metadata), por lo que 2 KB es un límite seguro.
+    ///
+    /// Este límite se aplica en DOS capas complementarias:
+    ///
+    /// 1. MIDDLEWARE (protección REAL): <c>UseSecureAuthRequestSizeLimit</c> asigna
+    ///    <c>IHttpMaxRequestBodySizeFeature.MaxRequestBodySize</c> ANTES de que el binder
+    ///    lea el cuerpo, por lo que Kestrel rechaza con 413 cualquier cuerpo mayor,
+    ///    incluidos los chunked sin Content-Length. Un endpoint filter no puede hacer
+    ///    esto porque en Minimal APIs se ejecuta DESPUÉS del binding.
+    ///
+    /// 2. ENDPOINT FILTER (defensa en profundidad): <c>EnforceAnonymousRequestSizeLimit</c>
+    ///    descarta rápido por Content-Length con 413 JSON a nivel de aplicación y además es
+    ///    verificable en TestServer.
+    ///
+    /// Recomendado: usar ambas. No reemplaza la configuración global de tu servidor
+    /// (<c>Kestrel.MaxRequestBodySize</c>) para el resto de la aplicación.
+    /// </remarks>
+    [Range(256, 8192, ErrorMessage = "El límite de tamaño del cuerpo debe estar entre 256 y 8192 bytes.")]
+    public int MaxAuthRequestBodySize { get; set; } = 2048;
+
+    /// <summary>
     /// Provider opcional para calcular el TTL del Access Token por usuario.
     /// Si es null o devuelve null, se usa <see cref="AccessTokenLifetime"/> global.
     /// </summary>

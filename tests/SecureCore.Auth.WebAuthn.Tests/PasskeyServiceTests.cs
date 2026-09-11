@@ -3,6 +3,7 @@ using Fido2NetLib.Objects;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using NSubstitute;
+using NSubstitute.Core;
 using SecureCore.Auth.Abstractions;
 using SecureCore.Auth.Abstractions.Interfaces;
 using SecureCore.Auth.Abstractions.Models;
@@ -156,5 +157,230 @@ public class PasskeyServiceTests
         _fido2.Received(1).GetAssertionOptions(
             Arg.Is<GetAssertionOptionsParams>(p =>
                 p.AllowedCredentials == null || p.AllowedCredentials.Count == 0));
+    }
+
+    // ─────────────────────────────────────────────────────
+    //  CompleteAssertionDetailedAsync (A-17)
+    // ─────────────────────────────────────────────────────
+
+    private static AuthenticatorAssertionRawResponse CreateAssertionResponse(string id = "c2lkZQ==") =>
+        new() { Id = id };
+
+    private static StoredCredential CreateStoredCredential(string userId = "u1") =>
+        new()
+        {
+            CredentialId = new byte[] { 1, 2, 3 },
+            UserId = userId,
+            PublicKey = new byte[] { 4 },
+            SignatureCount = 0
+        };
+
+    [Fact]
+    public async Task CompleteAssertionDetailedAsync_CredentialNotFound_ReturnsNotFound()
+    {
+        // Arrange
+        _credentialStore.FindByCredentialIdAsync(Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromResult<StoredCredential?>(null));
+
+        // Act
+        var result = await _passkeyService.CompleteAssertionDetailedAsync(
+            CreateAssertionResponse(),
+            Substitute.For<AssertionOptions>());
+
+        // Assert — expone distinción credencial no encontrada vs firma inválida
+        Assert.False(result.CredentialFound);
+        Assert.False(result.SignatureValid);
+        Assert.Null(result.User);
+        _fido2.DidNotReceive().MakeAssertionAsync(Arg.Any<MakeAssertionParams>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CompleteAssertionDetailedAsync_MalformedCredentialId_ReturnsNotFound_NotThrows()
+    {
+        // Arrange — Id no Base64 válido (regresión Nº4: antes propagaba FormatException → 500)
+
+        // Act — no debe lanzar, sino reportar credencial no encontrada con el contrato del método
+        var result = await _passkeyService.CompleteAssertionDetailedAsync(
+            CreateAssertionResponse("!!!not-base64!!!"),
+            Substitute.For<AssertionOptions>());
+
+        // Assert
+        Assert.False(result.CredentialFound);
+        Assert.False(result.SignatureValid);
+        Assert.Null(result.User);
+        _credentialStore.DidNotReceive().FindByCredentialIdAsync(Arg.Any<byte[]>(), Arg.Any<CancellationToken>());
+        _fido2.DidNotReceive().MakeAssertionAsync(Arg.Any<MakeAssertionParams>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CompleteAssertionDetailedAsync_NullCredentialId_ReturnsNotFound_NotThrows()
+    {
+        // Arrange — Id null (ArgumentNullException en Convert.FromBase64String);
+        // el guard de decodificación debe tratarlo como credencial no encontrada
+
+        // Act
+        var result = await _passkeyService.CompleteAssertionDetailedAsync(
+            CreateAssertionResponse(null!),
+            Substitute.For<AssertionOptions>());
+
+        // Assert
+        Assert.False(result.CredentialFound);
+        _fido2.DidNotReceive().MakeAssertionAsync(Arg.Any<MakeAssertionParams>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CompleteAssertionDetailedAsync_InvalidSignature_ExposesSubject()
+    {
+        // Arrange
+        var credential = CreateStoredCredential();
+        _credentialStore.FindByCredentialIdAsync(Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromResult<StoredCredential?>(credential));
+
+        var user = new UserIdentity
+        {
+            Id = "u1",
+            Email = "test@example.com",
+            SecurityStamp = "s",
+            PasswordHash = "h"
+        };
+        _userStore.FindByIdAsync("u1", Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromResult<UserIdentity?>(user));
+
+        _fido2.MakeAssertionAsync(Arg.Any<MakeAssertionParams>(), Arg.Any<CancellationToken>())
+            .Returns((Func<CallInfo, Task<VerifyAssertionResult>>)(_ => throw new Fido2VerificationException("firma inválida")));
+
+        // Act
+        var result = await _passkeyService.CompleteAssertionDetailedAsync(
+            CreateAssertionResponse(),
+            Substitute.For<AssertionOptions>());
+
+        // Assert — sujeto resuelto incluso en el ramo de fallo (lockout por cuenta)
+        Assert.True(result.CredentialFound);
+        Assert.False(result.SignatureValid);
+        Assert.Same(user, result.User);
+    }
+
+    [Fact]
+    public async Task CompleteAssertionDetailedAsync_Success_ReturnsUserAndUpdatesCounter()
+    {
+        // Arrange
+        var credential = CreateStoredCredential();
+        _credentialStore.FindByCredentialIdAsync(Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromResult<StoredCredential?>(credential));
+
+        var user = new UserIdentity
+        {
+            Id = "u1",
+            Email = "test@example.com",
+            SecurityStamp = "s",
+            PasswordHash = "h"
+        };
+        _userStore.FindByIdAsync("u1", Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromResult<UserIdentity?>(user));
+
+        _fido2.MakeAssertionAsync(Arg.Any<MakeAssertionParams>(), Arg.Any<CancellationToken>())
+            .Returns(new VerifyAssertionResult { SignCount = 7 });
+
+        // Act
+        var result = await _passkeyService.CompleteAssertionDetailedAsync(
+            CreateAssertionResponse(),
+            Substitute.For<AssertionOptions>());
+
+        // Assert
+        Assert.True(result.SignatureValid);
+        Assert.Same(user, result.User);
+
+        // Anti-clonación: el contador de la credencial almacenada se actualiza con el nuevo valor
+        await _credentialStore.Received(1).UpdateSignatureCountAsync(
+            Arg.Any<byte[]>(), 7u, Arg.Any<CancellationToken>());
+        await _eventDispatcher.Received(1).DispatchAsync(
+            Arg.Is<AuthEvent>(e => e.EventType == AuthEventType.PasskeyLoginSuccess),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CompleteAssertionDetailedAsync_SuccessButUserMissing_ReportsSignatureValidWithNullUser()
+    {
+        // Arrange
+        var credential = CreateStoredCredential();
+        _credentialStore.FindByCredentialIdAsync(Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromResult<StoredCredential?>(credential));
+        _userStore.FindByIdAsync("u1", Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromResult<UserIdentity?>(null));
+
+        _fido2.MakeAssertionAsync(Arg.Any<MakeAssertionParams>(), Arg.Any<CancellationToken>())
+            .Returns(new VerifyAssertionResult { SignCount = 1 });
+
+        // Act
+        var result = await _passkeyService.CompleteAssertionDetailedAsync(
+            CreateAssertionResponse(),
+            Substitute.For<AssertionOptions>());
+
+        // Assert — la firma era válida pero la cuenta ya no existe
+        Assert.True(result.CredentialFound);
+        Assert.True(result.SignatureValid);
+        Assert.Null(result.User);
+    }
+
+#pragma warning disable CS0618 // Testeo deliberado del wrapper obsoleto
+    [Fact]
+    public async Task CompleteAssertionAsync_ObsoleteWrapper_ReturnsUserOnSuccess()
+    {
+        // Arrange
+        var credential = CreateStoredCredential();
+        _credentialStore.FindByCredentialIdAsync(Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromResult<StoredCredential?>(credential));
+
+        var user = new UserIdentity
+        {
+            Id = "u1",
+            Email = "test@example.com",
+            SecurityStamp = "s",
+            PasswordHash = "h"
+        };
+        _userStore.FindByIdAsync("u1", Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromResult<UserIdentity?>(user));
+
+        _fido2.MakeAssertionAsync(Arg.Any<MakeAssertionParams>(), Arg.Any<CancellationToken>())
+            .Returns(new VerifyAssertionResult { SignCount = 1 });
+
+        // Act
+        var result = await _passkeyService.CompleteAssertionAsync(
+            CreateAssertionResponse(),
+            Substitute.For<AssertionOptions>());
+
+        // Assert — el wrapper conserva el contrato anterior (usuario autenticado o null)
+        Assert.Same(user, result);
+    }
+#pragma warning restore CS0618
+
+    [Fact]
+    public async Task CompleteAssertionAsync_ObsoleteWrapper_ReturnsNullOnInvalidSignature()
+    {
+        // Arrange
+        var credential = CreateStoredCredential();
+        _credentialStore.FindByCredentialIdAsync(Arg.Any<byte[]>(), Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromResult<StoredCredential?>(credential));
+        _userStore.FindByIdAsync("u1", Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromResult<UserIdentity?>(new UserIdentity
+            {
+                Id = "u1",
+                Email = "test@example.com",
+                SecurityStamp = "s",
+                PasswordHash = "h"
+            }));
+
+        _fido2.MakeAssertionAsync(Arg.Any<MakeAssertionParams>(), Arg.Any<CancellationToken>())
+            .Returns((Func<CallInfo, Task<VerifyAssertionResult>>)(_ => throw new Fido2VerificationException("firma inválida")));
+
+        // Act
+#pragma warning disable CS0618 // Testeo deliberado del wrapper obsoleto
+        var result = await _passkeyService.CompleteAssertionAsync(
+            CreateAssertionResponse(),
+            Substitute.For<AssertionOptions>());
+#pragma warning restore CS0618
+
+        // Assert — el contrato anterior no distingue credencial no encontrada de firma inválida
+        Assert.Null(result);
     }
 }

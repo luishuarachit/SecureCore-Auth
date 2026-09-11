@@ -287,6 +287,7 @@ public static class ServiceCollectionExtensions
             opt.LockoutDurations = config.Auth.LockoutDurations;
             opt.ClockSkew = config.Auth.ClockSkew;
             opt.SecurityStampCacheDuration = config.Auth.SecurityStampCacheDuration;
+            opt.ForgotPasswordRateLimiter = config.Auth.ForgotPasswordRateLimiter;
         });
 
         // Registrar y validar opciones de JWT
@@ -337,6 +338,7 @@ public static class ServiceCollectionExtensions
                 opt.LockoutDurations = config.Auth.LockoutDurations;
                 opt.ClockSkew = config.Auth.ClockSkew;
                 opt.SecurityStampCacheDuration = config.Auth.SecurityStampCacheDuration;
+                opt.ForgotPasswordRateLimiter = config.Auth.ForgotPasswordRateLimiter;
             })
             .ValidateDataAnnotations()
             .ValidateOnStart();
@@ -356,6 +358,20 @@ public static class ServiceCollectionExtensions
             return new InMemoryRateLimiter(
                 rateLimiterOptions?.MaxAttempts ?? 10,
                 rateLimiterOptions?.Window ?? TimeSpan.FromMinutes(1));
+        });
+
+        // DIDÁCTICA (Nº5): Rate limiter DEDICADO para /forgot-password. Usa keyed DI para
+        // tener un presupuesto independiente del de login sin romper la sobreescritura de
+        // IRateLimiter global. En multi-instancia, el implementador puede reemplazarlo con
+        // una implementación distribuida:
+        //   services.AddKeyedSingleton<IRateLimiter>("forgot-password", (sp, _) => new RedisRateLimiter(...));
+        services.AddKeyedSingleton<IRateLimiter>("forgot-password", (sp, _) =>
+        {
+            var authOptions = sp.GetRequiredService<IOptions<SecureAuthOptions>>().Value;
+            var forgotOptions = authOptions.ForgotPasswordRateLimiter;
+            return new InMemoryRateLimiter(
+                forgotOptions?.MaxAttempts ?? 5,
+                forgotOptions?.Window ?? TimeSpan.FromHours(1));
         });
 
         // DIDÁCTICA: Registro del mecanismo de locks para operaciones críticas.
@@ -420,6 +436,41 @@ public static class ServiceCollectionExtensions
     public static IApplicationBuilder UseSecureAuthValidation(this IApplicationBuilder app)
     {
         return app.UseMiddleware<SecurityStampMiddleware>();
+    }
+
+    /// <summary>
+    /// Aplica el límite de tamaño de cuerpo (<c>SecureAuthOptions.MaxAuthRequestBodySize</c>)
+    /// a las solicitudes bajo el prefijo de los endpoints de autenticación.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: Este middleware asigna <c>IHttpMaxRequestBodySizeFeature.MaxRequestBodySize</c>
+    /// ANTES del binding del cuerpo, por lo que Kestrel rechaza con 413 los payloads que
+    /// superen el límite (incluidos cuerpos chunked sin Content-Length). Es complementario
+    /// al endpoint filter del grupo: el filter descarta rápido por Content-Length y es
+    /// verificable en TestServer, mientras que este middleware es la barrera física real.
+    ///
+    /// Debe llamarse con el mismo prefijo usado en <c>MapSecureAuthEndpoints</c>:
+    /// <code>
+    /// app.MapSecureAuthEndpoints("/auth");
+    /// app.UseSecureAuthRequestSizeLimit("/auth");
+    /// </code>
+    /// </remarks>
+    /// <param name="app">El builder de la aplicación web.</param>
+    /// <param name="pathPrefix">Prefijo de ruta de los endpoints de autenticación (por defecto "/auth").</param>
+    /// <returns>El builder para encadenamiento.</returns>
+    public static IApplicationBuilder UseSecureAuthRequestSizeLimit(
+        this IApplicationBuilder app,
+        string pathPrefix = "/auth")
+    {
+        ArgumentNullException.ThrowIfNull(app);
+
+        if (string.IsNullOrWhiteSpace(pathPrefix))
+        {
+            throw new ArgumentException(
+                "El prefijo de ruta no puede estar vacío.", nameof(pathPrefix));
+        }
+
+        return app.UseMiddleware<RequestSizeLimitMiddleware>(new PathString(pathPrefix));
     }
 
     /// <summary>

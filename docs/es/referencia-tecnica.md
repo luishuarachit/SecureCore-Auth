@@ -49,6 +49,8 @@ Define parámetros del ciclo de vida de la sesión y políticas de bloqueo.
 | `SecurityStampCacheDuration` | `TimeSpan` | 1 min | Requerido |
 | `LoginRateLimitMaxAttempts` | `int` | 10 | [1, 1000] |
 | `LoginRateLimitWindow` | `TimeSpan` | 1 min | Requerido |
+| `ForgotPasswordRateLimiter` (v3.2.0) | `RateLimiterOptions?` | 5/hora por IP | Opcional (ver §9) |
+| `MaxAuthRequestBodySize` (v3.2.0) | `int` | 2048 bytes | [256, 8192] (ver §4.6) |
 | `AccessTokenLifetimeProvider` (v3.1.5) | `Func<UserIdentity, TimeSpan?>` | null | Opcional |
 
 #### Per-Role Access Token Lifetime (v3.1.5)
@@ -135,11 +137,13 @@ Gestiona la persistencia de los Refresh Tokens para RTR (Refresh Token Rotation)
 - `Task RevokeByFamilyAsync(string familyId, CancellationToken ct)`
 
 ### 3.3. IPasswordResetStore
-Persistencia de tokens de un solo uso.
+Persistencia de tokens de un solo uso. Solo se almacena el hash SHA-256 del token.
 - `Task StoreAsync(PasswordResetEntry entry, CancellationToken ct)`
 - `ValueTask<PasswordResetEntry?> FindByTokenHashAsync(string tokenHash, CancellationToken ct)`
 - `Task MarkAsUsedAsync(string tokenHash, CancellationToken ct)`
 - `ValueTask<int> CountRecentRequestsAsync(string userId, DateTime since, CancellationToken ct)`
+- `Task DeleteExpiredAsync(CancellationToken ct)`: limpieza periódica de tokens expirados (invocar con un BackgroundService diario).
+- `Task UpdateDeliveryStateAsync(string tokenHash, PasswordResetDeliveryState state, CancellationToken ct)` (v3.2.0): **miembro por defecto** (default interface member). Sobrescribirlo permite registrar si el email fue `Dispatched` o `Failed` (`PasswordResetEntry.DeliveryState`) para auditoría y limpieza de tokens huérfanos Pending/Failed (A-09). Si no se sobrescribe, no rompe nada: el estado queda en `Pending`.
 
 ### 3.4. IResetTokenMailer
 Interfaz para el dispatch de notificaciones de recuperación.
@@ -227,23 +231,37 @@ builder.AddOAuth(...);
 
 ### 4.6. Request Size Limit (A-10)
 
-Los endpoints de autenticación pueden ser objetivo de ataques DoS con payloads grandes. Se recomienda configurar límites de tamaño de request a nivel de Kestrel:
+Los endpoints de autenticación pueden ser objetivo de ataques DoS con payloads grandes. La librería acota el cuerpo de los endpoints anónimos `/auth/login`, `/auth/refresh`, `/auth/forgot-password` y `/auth/reset-password` con dos mecanismos complementarios:
+
+- **`SecureAuthOptions.MaxAuthRequestBodySize`** (default: `2048` bytes, rango `[256, 8192]`): define el límite.
+- **Endpoint filter** (`EnforceAnonymousRequestSizeLimit`): descarta rápido por `Content-Length` cualquier cuerpo válido que supere el límite, devolviendo `413 Payload Too Large` (JSON). Se añade automáticamente a los 4 endpoints anónimos y es verificable en TestServer.
+- **Middleware** `UseSecureAuthRequestSizeLimit(prefix)`: asigna `IHttpMaxRequestBodySizeFeature.MaxRequestBodySize` **antes** del binding, por lo que Kestrel rechaza con 413 también los cuerpos **chunked** (sin `Content-Length`).
+
+> **IMPORTANTE**: En Minimal APIs los endpoint filters se ejecutan **después** del binding, por lo que un filter por sí solo no puede limitar cuerpos chunked. Registra el middleware con el mismo prefijo que `MapSecureAuthEndpoints`:
 
 ```csharp
-// Program.cs - Limitar tamaño de request a 4KB para toda la API
-builder.WebHost.ConfigureKestrel(opt =>
-{
-    opt.Limits.MaxRequestBodySize = 4096;
-});
-
-// O específicamente para endpoints de auth (más restrictivo: 2KB)
-builder.WebHost.ConfigureKestrel(opt =>
-{
-    opt.Limits.MaxRequestBodySize = 4096; // global: 4KB
-});
+app.MapSecureAuthEndpoints("/auth");
+app.UseSecureAuthRequestSizeLimit("/auth");
 ```
 
-> **NOTA**: Los endpoints de AuthCore (/auth/login, /auth/refresh, /auth/forgot-password, /auth/reset-password) típicamente reciben payloads menores a 1KB (email + password). Un límite de 4KB es razonable y seguro.
+Para límites globales de toda la API (fuera de los endpoints de auth), sigue usando la configuración de Kestrel (`Kestrel.MaxRequestBodySize`); el middleware no la reemplaza.
+
+### 4.7. PasskeyService (WebAuthn)
+
+Servicio de registro y verificación de Passkeys (FIDO2/WebAuthn) para el login sin contraseña.
+
+- **`CompleteRegistrationAsync(response, options, userId, displayName)`**: registra una passkey nueva.
+- **`BeginAssertionAsync(credentialIds)`**: genera el challenge de login (`null` = Discoverable Credentials).
+- **`CompleteAssertionAsync(response, options)`**: verifica la firma y devuelve el usuario, o `null` si falla (ambiguo por diseño).
+- **`CompleteAssertionDetailedAsync(response, options)`** (v3.2.0, A-17): verifica la firma y devuelve un `PasskeyAssertionResult` que permite distinguir el motivo:
+
+| Propiedad | Significado |
+| :--- | :--- |
+| `User` | El sujeto resuelto (si pudo resolverse), útil para políticas por cuenta (lockout). |
+| `CredentialFound` | Si la credencial referida por el cliente existe en el store. |
+| `SignatureValid` | Si la firma del challenge se verificó correctamente. |
+
+> **SEGURIDAD** (v3.2.0): Un `Id` de credencial malformado (no Base64) se trata como "credencial no encontrada" y nunca lanza excepción. `CredentialFound` es un oráculo de existencia de credenciales — necesario por diseño para el lockout por cuenta — pero **no expongas esta distinción al cliente**: devuelve siempre el mismo error de autenticación genérico.
 
 ---
 
@@ -630,6 +648,17 @@ if (!rateLimiter.IsAllowed(ipAddress))
 
 // En login exitoso:
 rateLimiter.Reset(ipAddress);
+```
+
+#### Throttling dedicado de `/forgot-password` (v3.2.0)
+
+El endpoint anónimo `/forgot-password` usa un limiter **dedicado y keyed** (`"forgot-password"` en DI), para no compartir presupuesto con el de login. Se configura con `SecureAuthOptions.ForgotPasswordRateLimiter` (default: 5 solicitudes/hora por IP). El throttling es **silencioso**: al superarse el límite la solicitud se descarta pero se responde el mismo 200 ciego, sin oráculo al atacante.
+
+En arquitecturas multi-instancia, reemplaza la implementación default (in-memory) por una distribuida:
+
+```csharp
+services.AddKeyedSingleton<IRateLimiter>("forgot-password",
+    (sp, _) => new RedisRateLimiter(max: 5, window: TimeSpan.FromHours(1)));
 ```
 
 ### Limitaciones y Recomendaciones

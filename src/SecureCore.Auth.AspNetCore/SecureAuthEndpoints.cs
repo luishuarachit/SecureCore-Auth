@@ -4,7 +4,9 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
 using SecureCore.Auth.Abstractions.Interfaces;
+using SecureCore.Auth.Abstractions.Options;
 using SecureCore.Auth.Core.Services;
 
 namespace SecureCore.Auth.AspNetCore;
@@ -113,6 +115,7 @@ public static class SecureAuthEndpoints
                 new { error = "invalid_credentials", message = result.Message },
                 statusCode: StatusCodes.Status401Unauthorized);
         })
+        .AddEndpointFilter(EnforceAnonymousRequestSizeLimit)
         .WithName("Login")
         .WithDescription("Inicia sesión con email y contraseña.")
         .AllowAnonymous();
@@ -141,6 +144,7 @@ public static class SecureAuthEndpoints
                 expiresAt = tokens.ExpiresAt
             });
         })
+        .AddEndpointFilter(EnforceAnonymousRequestSizeLimit)
         .WithName("RefreshToken")
         .WithDescription("Rota el Refresh Token y emite un nuevo par de tokens.")
         .AllowAnonymous();
@@ -221,6 +225,7 @@ public static class SecureAuthEndpoints
         group.MapPost("/forgot-password", async (
             ForgotPasswordRequest request,
             IServiceProvider serviceProvider,
+            HttpContext httpContext,
             CancellationToken ct) =>
         {
             var orchestrator = serviceProvider.GetService<PasswordResetOrchestrator>();
@@ -231,11 +236,25 @@ public static class SecureAuthEndpoints
                     statusCode: StatusCodes.Status503ServiceUnavailable);
             }
 
+            // DIDÁCTICA (Nº5): Throttling por IP SILENCIOSO. A diferencia de /login, aquí NO
+            // se responde 429: el endpoint sigue devolviendo el 200 ciego para no revelar al
+            // atacante cuándo se le limita (evita oráculos extra y feedback de throttling).
+            // Al superarse el presupuesto la solicitud simplemente se descarta. Usamos un
+            // limiter dedicado (keyed "forgot-password") para no compartir el presupuesto
+            // con el de login.
+            var limiter = serviceProvider.GetRequiredKeyedService<IRateLimiter>("forgot-password");
+            var ipAddress = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            if (!limiter.IsAllowed("forgot-password:" + ipAddress))
+            {
+                return Results.Ok(new { message = "Si tu dirección existe en nuestro sistema, recibirás un correo con instrucciones." });
+            }
+
             await orchestrator.RequestPasswordResetAsync(request.Email, ct);
 
             // Siempre respondemos 200 OK independientemente de qué ocurrió en Orchestrator.
             return Results.Ok(new { message = "Si tu dirección existe en nuestro sistema, recibirás un correo con instrucciones." });
         })
+        .AddEndpointFilter(EnforceAnonymousRequestSizeLimit)
         .WithName("ForgotPassword")
         .WithDescription("Solicita un enlace para restablecer la contraseña.")
         .AllowAnonymous();
@@ -267,11 +286,60 @@ public static class SecureAuthEndpoints
                 new { error = "invalid_token", message = "El enlace de restablecimiento es inválido o ha expirado." },
                 statusCode: StatusCodes.Status400BadRequest);
         })
+        .AddEndpointFilter(EnforceAnonymousRequestSizeLimit)
         .WithName("ResetPassword")
         .WithDescription("Confirma y actualiza la contraseña con un token válido.")
         .AllowAnonymous();
 
         return group;
+    }
+
+    /// <summary>
+    /// Endpoint filter que acota el tamaño máximo del cuerpo de las solicitudes
+    /// en los endpoints de autenticación anónimos.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: En Minimal APIs el binding del cuerpo ocurre ANTES de que se ejecuten
+    /// los endpoint filters, por lo que un filter NO puede rechazar el body vía
+    /// <c>IHttpMaxRequestBodySizeFeature</c> (Kestrel ya habría leído el payload).
+    /// La protección real la aporta el middleware <c>UseSecureAuthRequestSizeLimit</c>,
+    /// que asigna la feature ANTES del binding.
+    ///
+    /// Este filtro es complementario: descarta de forma rápida (por Content-Length, sin
+    /// leer el cuerpo) cualquier payload VÁLIDO que supere el límite, devolviendo 413 JSON
+    /// a nivel de aplicación. Además es verificable en TestServer, donde el límite físico
+    /// del servidor no siempre está disponible.
+    ///
+    /// Lo resolvemos por request desde <c>RequestServices</c> para no capturar opciones en
+    /// tiempo de mapeo (las opciones se configuran de forma diferida).
+    /// </remarks>
+    private static async ValueTask<object?> EnforceAnonymousRequestSizeLimit(
+        EndpointFilterInvocationContext context,
+        EndpointFilterDelegate next)
+    {
+        var options = context.HttpContext.RequestServices
+            .GetRequiredService<IOptions<SecureAuthOptions>>().Value;
+        var limit = options.MaxAuthRequestBodySize;
+
+        // DIDÁCTICA: Los endpoint filters se ejecutan DESPUÉS del binding de parámetros
+        // (reciben los argumentos ya enlazados). Por tanto, un cuerpo malformado será
+        // rechazado por el JSON binder con 400 antes de llegar aquí: igualmente queda
+        // bloqueado. Lo que este filtro garantiza es que un cuerpo VÁLIDO pero superior
+        // al límite (Content-Length conocido) se rechace con 413 sin procesarse.
+        //
+        // Para cuerpos en chunked (sin Content-Length) la barrera física la pone el
+        // middleware UseSecureAuthRequestSizeLimit via IHttpMaxRequestBodySizeFeature
+        // (Kestrel responde 413 al leer el body). Este filtro añade defensa en profundidad
+        // a nivel de aplicación, también verificable en TestServer.
+        var contentLength = context.HttpContext.Request.ContentLength;
+        if (contentLength is not null && contentLength.Value > limit)
+        {
+            return Results.Json(
+                new { error = "payload_too_large", message = "El cuerpo de la solicitud excede el límite permitido." },
+                statusCode: StatusCodes.Status413PayloadTooLarge);
+        }
+
+        return await next(context);
     }
 }
 

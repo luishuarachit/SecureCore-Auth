@@ -49,6 +49,8 @@ Defines session lifecycle parameters and lockout policies.
 | `SecurityStampCacheDuration` | `TimeSpan` | 1 min | Required |
 | `LoginRateLimitMaxAttempts` | `int` | 10 | [1, 1000] |
 | `LoginRateLimitWindow` | `TimeSpan` | 1 min | Required |
+| `ForgotPasswordRateLimiter` (v3.2.0) | `RateLimiterOptions?` | 5/hour per IP | Optional (see §9) |
+| `MaxAuthRequestBodySize` (v3.2.0) | `int` | 2048 bytes | [256, 8192] (see §4.6) |
 | `AccessTokenLifetimeProvider` (v3.1.5) | `Func<UserIdentity, TimeSpan?>` | null | Optional |
 
 #### Per-Role Access Token Lifetime (v3.1.5)
@@ -164,11 +166,13 @@ Manages persistence of Refresh Tokens for RTR (Refresh Token Rotation).
 - `Task RevokeByFamilyAsync(string familyId, CancellationToken ct)`
 
 ### 3.3. IPasswordResetStore
-Persistence for single-use tokens.
+Persistence for single-use tokens. Only the SHA-256 hash of the token is stored.
 - `Task StoreAsync(PasswordResetEntry entry, CancellationToken ct)`
 - `ValueTask<PasswordResetEntry?> FindByTokenHashAsync(string tokenHash, CancellationToken ct)`
 - `Task MarkAsUsedAsync(string tokenHash, CancellationToken ct)`
 - `ValueTask<int> CountRecentRequestsAsync(string userId, DateTime since, CancellationToken ct)`
+- `Task DeleteExpiredAsync(CancellationToken ct)`: periodic cleanup of expired tokens (invoke with a daily BackgroundService).
+- `Task UpdateDeliveryStateAsync(string tokenHash, PasswordResetDeliveryState state, CancellationToken ct)` (v3.2.0): **default interface member**. Override it to record whether the email was `Dispatched` or `Failed` (`PasswordResetEntry.DeliveryState`) for audit and cleanup of orphaned Pending/Failed tokens (A-09). Not overriding it breaks nothing: the state stays `Pending`.
 
 ### 3.4. IResetTokenMailer
 Interface for recovery notification dispatch.
@@ -302,23 +306,37 @@ builder.AddOAuth(...);
 
 ### 4.6. Request Size Limit (A-10)
 
-Authentication endpoints can be targets of DoS attacks with large payloads. It is recommended to configure request size limits at the Kestrel level:
+Authentication endpoints can be targets of DoS attacks with large payloads. The library limits the body of the anonymous endpoints `/auth/login`, `/auth/refresh`, `/auth/forgot-password` and `/auth/reset-password` with two complementary mechanisms:
+
+- **`SecureAuthOptions.MaxAuthRequestBodySize`** (default: `2048` bytes, range `[256, 8192]`): defines the limit.
+- **Endpoint filter** (`EnforceAnonymousRequestSizeLimit`): fast rejection by `Content-Length` for any valid body that exceeds the limit, returning `413 Payload Too Large` (JSON). It is added automatically to the 4 anonymous endpoints and is verifiable in TestServer.
+- **Middleware** `UseSecureAuthRequestSizeLimit(prefix)`: sets `IHttpMaxRequestBodySizeFeature.MaxRequestBodySize` **before** binding, so Kestrel rejects with 413 even **chunked** bodies (without `Content-Length`).
+
+> **IMPORTANT**: In Minimal APIs endpoint filters run **after** binding, so a filter alone cannot limit chunked bodies. Register the middleware with the same prefix as `MapSecureAuthEndpoints`:
 
 ```csharp
-// Program.cs - Limit request size to 4KB for the entire API
-builder.WebHost.ConfigureKestrel(opt =>
-{
-    opt.Limits.MaxRequestBodySize = 4096;
-});
-
-// Or specifically for auth endpoints (more restrictive: 2KB)
-builder.WebHost.ConfigureKestrel(opt =>
-{
-    opt.Limits.MaxRequestBodySize = 4096; // global: 4KB
-});
+app.MapSecureAuthEndpoints("/auth");
+app.UseSecureAuthRequestSizeLimit("/auth");
 ```
 
-> **NOTE**: AuthCore endpoints (/auth/login, /auth/refresh, /auth/forgot-password, /auth/reset-password) typically receive payloads under 1KB (email + password). A 4KB limit is reasonable and secure.
+For global limits for the whole API (outside the auth endpoints), keep using Kestrel configuration (`Kestrel.MaxRequestBodySize`); the middleware does not replace it.
+
+### 4.7. PasskeyService (WebAuthn)
+
+Registration and assertion service for Passkeys (FIDO2/WebAuthn), enabling passwordless login.
+
+- **`CompleteRegistrationAsync(response, options, userId, displayName)`**: registers a new passkey.
+- **`BeginAssertionAsync(credentialIds)`**: generates the login challenge (`null` = Discoverable Credentials).
+- **`CompleteAssertionAsync(response, options)`**: verifies the signature and returns the user, or `null` on failure (ambiguous by design).
+- **`CompleteAssertionDetailedAsync(response, options)`** (v3.2.0, A-17): verifies the signature and returns a `PasskeyAssertionResult` that distinguishes the outcome:
+
+| Property | Meaning |
+| :--- | :--- |
+| `User` | The resolved subject (if resolvable), useful for per-account policies (lockout). |
+| `CredentialFound` | Whether the credential referenced by the client exists in the store. |
+| `SignatureValid` | Whether the challenge signature verified correctly. |
+
+> **SECURITY** (v3.2.0): A malformed credential `Id` (not Base64) is treated as "credential not found" and never throws. `CredentialFound` is a credential-existence oracle — needed by design for per-account lockout — but **do not expose this distinction to the client**: always return the same generic authentication error.
 
 ---
 
@@ -700,6 +718,17 @@ if (!rateLimiter.IsAllowed(ipAddress))
 
 // On successful login:
 rateLimiter.Reset(ipAddress);
+```
+
+#### Dedicated throttling of `/forgot-password` (v3.2.0)
+
+The anonymous `/forgot-password` endpoint uses a **keyed, dedicated** limiter (`"forgot-password"` in DI), so it does not share budget with the login one. It is configured with `SecureAuthOptions.ForgotPasswordRateLimiter` (default: 5 requests/hour per IP). The throttling is **silent**: when the limit is exceeded the request is discarded but the endpoint still responds with the same blind 200, giving no oracle to the attacker.
+
+In multi-instance architectures, replace the default (in-memory) implementation with a distributed one:
+
+```csharp
+services.AddKeyedSingleton<IRateLimiter>("forgot-password",
+    (sp, _) => new RedisRateLimiter(max: 5, window: TimeSpan.FromHours(1)));
 ```
 
 ### Limitations and Recommendations

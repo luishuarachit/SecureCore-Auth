@@ -5,6 +5,25 @@ Todas los cambios notables en este proyecto serán documentados en este archivo.
 El formato está basado en [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 y este proyecto se adhiere a [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - v3.2.0
+
+### Añadido
+- **Límite de tamaño de payload en endpoints de autenticación (A-10)**:
+  - `SecureAuthOptions.MaxAuthRequestBodySize` (default: 2048 bytes, rango [256, 8192]) acota el cuerpo de `/login`, `/refresh`, `/forgot-password` y `/reset-password`.
+  - Protección en dos capas: endpoint filter automático (413 JSON por `Content-Length`, verificable en TestServer) + middleware `UseSecureAuthRequestSizeLimit("/auth")` que asigna `IHttpMaxRequestBodySizeFeature` **antes** del binding (Kestrel rechaza con 413 también cuerpos chunked).
+- **Aserción de passkeys con motivo distinguible (A-17)**: `PasskeyService.CompleteAssertionDetailedAsync` devuelve `PasskeyAssertionResult` (`User`, `CredentialFound`, `SignatureValid`). Un `Id` de credencial malformado (no Base64) ya no lanza excepción: se trata como credencial no encontrada.
+- **Estado de entrega del email de reset (A-09)**: `PasswordResetEntry.DeliveryState` (`Pending`/`Dispatched`/`Failed`) y miembro opcional (default interface member) `IPasswordResetStore.UpdateDeliveryStateAsync`. Las implementaciones existentes no se rompen: sin sobrescribirlo el estado queda en `Pending`.
+- **Rate limiting dedicado por IP en `/forgot-password`**: limiter keyed `"forgot-password"` configurable con `SecureAuthOptions.ForgotPasswordRateLimiter` (default: 5 solicitudes/hora). El throttling es **silencioso**: al superarse el límite se descarta la solicitud y se responde el mismo 200 ciego.
+
+### Corregido
+- XML docs obsoletas de `MaxAuthRequestBodySize` y del filtro de endpoints: afirmaban que un endpoint filter rechazaba con 413 antes de deserializar; en Minimal APIs los filters se ejecutan **después** del binding. La protección real la aporta el middleware.
+- `PasskeyService.CompleteAssertionDetailedAsync` propagaba `FormatException`/`ArgumentNullException` (→ HTTP 500) ante un `Id` de credencial malformado: ahora retorna credencial no encontrada mediante `TryDecodeBase64CredentialId` (aplicado también en el ramo de fallo de firma).
+
+### Seguridad
+- Throttling anti-abuso en `/forgot-password` sin exponer oráculo ni feedback de bloqueo (200 ciego).
+- Documentado el riesgo de enumeración: no exponer al cliente la distinción `CredentialNotFound` vs `InvalidSignature` de las passkeys (`CredentialFound` es un oráculo necesario por diseño para lockout por cuenta).
+- Documentada la responsabilidad de limpieza periódica de tokens de reset expirados (`IPasswordResetStore.DeleteExpiredAsync`) y de tokens huérfanos Pending/Failed (A-09).
+
 ## [3.1.8] - 2026-08-01
 
 ### Corregido

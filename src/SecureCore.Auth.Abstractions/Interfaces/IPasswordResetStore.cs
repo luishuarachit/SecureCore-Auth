@@ -67,6 +67,32 @@ public interface IPasswordResetStore
     /// <summary>
     /// Elimina todos los tokens expirados de la tabla. Útil para tareas de limpieza periódica.
     /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA (Nº9): Los tokens con estado <c>Pending</c>/<c>Failed</c> (email no
+    /// entregado o en curso) y los <c>Used</c> permanecen huérfanos hasta su expiración
+    /// natural. La librería NO programa esa limpieza: es responsabilidad del implementador
+    /// invocar <c>DeleteExpiredAsync</c> de forma periódica (ej: Hangfire/BackgroundService
+    /// diario) para no acumular filas innecesarias en la tabla de resets.
+    /// </remarks>
     /// <param name="cancellationToken">Token de cancelación.</param>
     Task DeleteExpiredAsync(CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Actualiza el estado de entrega del email de un token de restablecimiento.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: Método ADITIVO (default interface member). Las implementaciones existentes
+    /// que no lo sobrescriban NO se rompen: el valor devuelto es un no-op y el estado de
+    /// entrega quedará en <see cref="Models.PasswordResetDeliveryState.Pending"/>. Sobrescribirlo
+    /// permite registrar <c>Dispatched</c>/<c>Failed</c> para auditoría y limpieza de tokens
+    /// huérfanos (ver A-09).
+    /// </remarks>
+    /// <param name="tokenHash">Hash SHA-256 del token crudo (Base64Url).</param>
+    /// <param name="state">Nuevo estado de entrega.</param>
+    /// <param name="cancellationToken">Token de cancelación.</param>
+    Task UpdateDeliveryStateAsync(
+        string tokenHash,
+        Models.PasswordResetDeliveryState state,
+        CancellationToken cancellationToken = default)
+        => Task.CompletedTask;
 }

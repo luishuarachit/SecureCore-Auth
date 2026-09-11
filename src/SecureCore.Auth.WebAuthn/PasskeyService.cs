@@ -250,19 +250,45 @@ public sealed class PasskeyService(
     /// Paso 2 de login: Valida la firma del autenticador y retorna el usuario autenticado.
     /// </summary>
     /// <remarks>
-    /// DIDÁCTICA: El autenticador firmó el challenge con su clave privada.
-    /// El servidor verifica la firma usando la clave pública almacenada durante el registro.
-    /// Si la firma es válida, el usuario queda autenticado sin haber ingresado contraseña.
-    ///
-    /// También se verifica el contador de firmas (SignatureCount) como medida anti-clonación:
-    /// si el contador recibido es menor o igual al almacenado, podría indicar que alguien
-    /// clonó el autenticador físico.
+    /// DIDÁCTICA: Este método es un wrapper de compatibilidad sobre
+    /// <see cref="CompleteAssertionDetailedAsync"/>. No distingue entre "credencial no
+    /// encontrada" y "firma inválida" (ambas retornan <c>null</c>). Prefiere el método detallado
+    /// cuando necesites conocer el sujeto en el ramo de fallo (p.ej. lockout por cuenta).
     /// </remarks>
     /// <param name="assertionResponse">Respuesta del autenticador del navegador.</param>
     /// <param name="originalOptions">Las opciones originales generadas en BeginAssertion.</param>
     /// <param name="cancellationToken">Token de cancelación.</param>
     /// <returns>La identidad del usuario autenticado o null si falla la verificación.</returns>
+    [Obsolete("Use CompleteAssertionDetailedAsync which exposes the subject (User) even when the signature fails.")]
     public async Task<UserIdentity?> CompleteAssertionAsync(
+        AuthenticatorAssertionRawResponse assertionResponse,
+        AssertionOptions originalOptions,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await CompleteAssertionDetailedAsync(assertionResponse, originalOptions, cancellationToken);
+        return result.SignatureValid ? result.User : null;
+    }
+
+    /// <summary>
+    /// Paso 2 de login: valida la firma del autenticador y retorna el resultado con el sujeto resuelto.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: El autenticador firmó el challenge con su clave privada.
+    /// El servidor verifica la firma usando la clave pública almacenada durante el registro.
+    /// Si la firma es válida, el usuario queda autenticado sin haber ingresado contraseña.
+    ///
+    /// También se verifica el contador de firmas (SignatureCount) como medida
+    /// anti-clonación: si el contador recibido es menor o igual al almacenado, podría
+    /// indicar que alguien clonó el autenticador físico.
+    ///
+    /// En el ramo de fallo de firma se intenta resolver el <see cref="PasskeyAssertionResult.User"/>
+    /// para habilitar políticas de seguridad por cuenta (p.ej. lockout de aserciones fallidas).
+    /// </remarks>
+    /// <param name="assertionResponse">Respuesta del autenticador del navegador.</param>
+    /// <param name="originalOptions">Las opciones originales generadas en BeginAssertion.</param>
+    /// <param name="cancellationToken">Token de cancelación.</param>
+    /// <returns>El resultado de la aserción con la credencial y el sujeto resueltos.</returns>
+    public async Task<PasskeyAssertionResult> CompleteAssertionDetailedAsync(
         AuthenticatorAssertionRawResponse assertionResponse,
         AssertionOptions originalOptions,
         CancellationToken cancellationToken = default)
@@ -273,14 +299,28 @@ public sealed class PasskeyService(
         try
         {
             // Buscamos la credencial almacenada por su ID
-            var credentialIdBytes = Convert.FromBase64String(assertionResponse.Id);
+            //
+            // DIDÁCTICA: El Id del autenticador llega en Base64 desde el navegador.
+            // Si el payload es malformado (Id no Base64 válido), Convert lanzaría
+            // FormatException que NO la captura el catch de Fido2VerificationException,
+            // propagándose como 500. Un Id malformado no puede referirse a una
+            // credencial existente, así que tratarlo como "no encontrada" preserva el
+            // contrato del método (siempre devuelve un PasskeyAssertionResult, nunca lanza).
+            var credentialIdBytes = TryDecodeBase64CredentialId(assertionResponse.Id);
+            if (credentialIdBytes is null)
+            {
+                logger.LogWarning(
+                    "Id de credencial no es Base64 válido durante aserción; se rechaza como no encontrada");
+                return PasskeyAssertionResult.CredentialNotFound();
+            }
+
             var storedCredential = await credentialStore.FindByCredentialIdAsync(
                 credentialIdBytes, cancellationToken);
 
             if (storedCredential is null)
             {
                 logger.LogWarning("Credencial no encontrada para ID proporcionado durante aserción");
-                return null;
+                return PasskeyAssertionResult.CredentialNotFound();
             }
 
             // Verificamos la firma del autenticador
@@ -292,13 +332,29 @@ public sealed class PasskeyService(
                 StoredSignatureCounter = storedCredential.SignatureCount,
                 IsUserHandleOwnerOfCredentialIdCallback = async (args, ct) =>
                 {
+                    // DIDÁCTICA (Nº8): Este callback solo confirma que la credencial EXISTE.
+                    // No vincula el userHandle remoto contra el usuario almacenado; esa
+                    // vinculación criptográfica viene resuelta porque el sujeto se recupera
+                    // desde storedCredential.UserId (la misma credencial verificada), no desde
+                    // argumentos controlados por el cliente. Mientras se devuelva "existe",
+                    // Fido2 garantiza que el par de claves es el correcto para la credencial.
                     var credential = await credentialStore.FindByCredentialIdAsync(
                         args.CredentialId, ct);
                     return credential is not null;
                 }
             }, cancellationToken: cancellationToken);
 
-            // Actualizar el contador de firmas (anti-clonación)
+            // DIDÁCTICA (Nº6): El contador de firmas se actualiza SIN try/catch a propósito:
+            // un fallo transitorio del store aquí (timeout, caída) NO debe silenciarse, sino
+            // propagarse al llamador para que la capa superior lo registre y decida.
+            // Trae un coste aceptable: un login con firma válida podría resolverse como
+            // excepción 5xx si la escritura falla. No se recomienda reintentar ni ocultar
+            // porque eso impediría detectar operaciones de store degradadas.
+            //
+            // (Nº7) Aviso anti-enumeración: los resultados CredentialNotFound vs.
+            // InvalidSignature son distinguibles POR DISEÑO (necesario para lockout por
+            // cuenta). No expongas esa distinción al cliente: devuelve siempre el mismo
+            // formato de error genérico de autenticación.
             await credentialStore.UpdateSignatureCountAsync(
                 credentialIdBytes,
                 assertionResult.SignCount,
@@ -312,7 +368,7 @@ public sealed class PasskeyService(
                 logger.LogError(
                     "Usuario {UserId} no encontrado tras aserción exitosa de passkey",
                     storedCredential.UserId);
-                return null;
+                return new PasskeyAssertionResult(null, CredentialFound: true, SignatureValid: true);
             }
 
             logger.LogInformation(
@@ -328,12 +384,37 @@ public sealed class PasskeyService(
                 }
             }, cancellationToken);
 
-            return user!;
+            return PasskeyAssertionResult.Success(user);
         }
         catch (Fido2VerificationException ex)
         {
             logger.LogError(ex, "Error de verificación FIDO2 durante aserción");
-            return null;
+
+            // DIDÁCTICA: Intentamos resolver el sujeto para contabilizar el fallo por cuenta.
+            // El fallo solo puede ser de firma (la credencial ya fue encontrada), así que
+            // exponemos la credencial como encontrada y la firma como inválida.
+            UserIdentity? subject = null;
+            try
+            {
+                var credentialIdBytes = TryDecodeBase64CredentialId(assertionResponse.Id);
+                if (credentialIdBytes is null)
+                {
+                    return PasskeyAssertionResult.InvalidSignature(subject);
+                }
+
+                var credential = await credentialStore.FindByCredentialIdAsync(
+                    credentialIdBytes, cancellationToken);
+                if (credential is not null)
+                {
+                    subject = await userStore.FindByIdAsync(credential.UserId, cancellationToken);
+                }
+            }
+            catch (Exception lookupEx)
+            {
+                logger.LogDebug(lookupEx, "No se pudo resolver el sujeto en fallo de aserción");
+            }
+
+            return PasskeyAssertionResult.InvalidSignature(subject);
         }
     }
 
@@ -348,5 +429,30 @@ public sealed class PasskeyService(
             "discouraged" => UserVerificationRequirement.Discouraged,
             _ => UserVerificationRequirement.Preferred
         };
+    }
+
+    /// <summary>
+    /// Decodifica el Id de credencial (Base64) de forma tolerante a payloads malformados.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: Devuelve <c>null</c> si el valor está vacío o no es Base64 válido,
+    /// permitiendo tratar el caso como "credencial no encontrada" sin lanzar excepciones
+    /// (un Id malformado no puede corresponder a una credencial del store).
+    /// </remarks>
+    private static byte[]? TryDecodeBase64CredentialId(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        try
+        {
+            return Convert.FromBase64String(value);
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
     }
 }

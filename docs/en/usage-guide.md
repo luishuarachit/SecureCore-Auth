@@ -349,6 +349,8 @@ public class MyPasswordResetStore : IPasswordResetStore
 }
 ```
 
+> **TIP** (v3.2.0): **Don't forget to enable cleanup**: invoke `DeleteExpiredAsync` periodically (for example, with a daily `BackgroundService`) to remove expired tokens. `UpdateDeliveryStateAsync` is an **optional** member (default interface member): overriding it lets you record whether the email was `Dispatched`/`Failed` (state `DeliveryState`) and locate orphaned Pending/Failed tokens (A-09). If you don't override it, nothing breaks: the state stays `Pending`.
+
 #### IResetTokenMailer — How to send the email
 
 This is an **agnostic** interface. You decide whether to use SMTP, SendGrid, Amazon SES, etc. The library only gives you the user's email and the **raw token** (which is only visible at this moment).
@@ -423,6 +425,11 @@ app.MapSecureAuthEndpoints("/auth");
 //   POST /auth/refresh     — Refresh token
 //   POST /auth/logout      — Log out
 //   POST /auth/revoke-all  — Close ALL sessions
+
+// ─── 6. Protect the auth endpoints against large payloads (A-10) ───
+// Applies MaxAuthRequestBodySize (default 2 KB) BEFORE binding;
+// Kestrel responds 413 even for chunked bodies (no Content-Length).
+app.UseSecureAuthRequestSizeLimit("/auth"); // use the same prefix as MapSecureAuthEndpoints
 
 app.Run();
 ```
@@ -903,6 +910,8 @@ POST /auth/reset-password
   "newPassword": "NewSuperSecurePassword"
 }
 ```
+
+> **Per-IP protection** (v3.2.0): `/forgot-password` is rate-limited per IP with a dedicated limiter (`SecureAuthOptions.ForgotPasswordRateLimiter`, default: 5 requests/hour). The throttling is **silent**: once the limit is exceeded the request is discarded, but the response is still the same blind 200 — the attacker cannot tell that they were blocked nor whether the email exists.
 
 ---
 

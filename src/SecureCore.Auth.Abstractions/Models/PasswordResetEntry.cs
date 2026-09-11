@@ -35,6 +35,17 @@ public record PasswordResetEntry
     public bool IsUsed { get; init; } = false;
 
     /// <summary>
+    /// Estado de entrega del email asociado a este token. Por defecto: <see cref="PasswordResetDeliveryState.Pending"/>.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: El token se persiste con estado <c>Pending</c>. Tras un envío exitoso del
+    /// email se marca <see cref="PasswordResetDeliveryState.Dispatched"/>, y si el envío falla
+    /// <see cref="PasswordResetDeliveryState.Failed"/>. Esto permite auditoría y limpieza de
+    /// tokens huérfanos respetando la decisión de persistir antes de enviar.
+    /// </remarks>
+    public PasswordResetDeliveryState DeliveryState { get; init; } = PasswordResetDeliveryState.Pending;
+
+    /// <summary>
     /// Fecha de creación del token. Útil para auditoría y conteo en mecanismos de Limitación de Tasas (Rate Limiting).
     /// </summary>
     public DateTime CreatedAtUtc { get; init; } = DateTime.UtcNow;

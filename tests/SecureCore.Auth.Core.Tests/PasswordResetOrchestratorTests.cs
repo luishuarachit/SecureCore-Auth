@@ -118,8 +118,70 @@ public class PasswordResetOrchestratorTests
         // Assert
         Assert.True(result);
         Assert.NotNull(storedEntry);
+        Assert.Equal(PasswordResetDeliveryState.Pending, storedEntry.DeliveryState); // A-09 si el store no soporta UpdateDeliveryStateAsync queda Pending
         Assert.NotNull(rawTokenSent);
         Assert.NotEqual(rawTokenSent, storedEntry.TokenHash); // En BD jamás debe haber token en plaintext.
+    }
+
+    [Fact]
+    public async Task RequestReset_EmailSendSucceeds_MarksDeliveryDispatched()
+    {
+        // Arrange
+        var user = new UserIdentity { Id = "user-1", Email = "found@example.com", SecurityStamp = "stamp" };
+        _userStoreMock.Setup(m => m.FindByEmailAsync("found@example.com", default))
+            .ReturnsAsync(user);
+        _passwordResetStoreMock.Setup(m => m.CountRecentRequestsAsync(user.Id, It.IsAny<DateTime>(), default))
+            .ReturnsAsync(0);
+        _passwordResetStoreMock.Setup(m => m.StoreAsync(It.IsAny<PasswordResetEntry>(), default))
+            .Returns(Task.CompletedTask);
+        _resetTokenMailerMock.Setup(m => m.SendResetEmailAsync("found@example.com", It.IsAny<string>(), default))
+            .Returns(Task.CompletedTask);
+
+        // Act
+        var result = await _sut.RequestPasswordResetAsync("found@example.com");
+
+        // Assert — A-09: tras envío exitoso el token se marca como entregado
+        Assert.True(result);
+        _passwordResetStoreMock.Verify(
+            m => m.UpdateDeliveryStateAsync(It.IsAny<string>(), PasswordResetDeliveryState.Dispatched, It.IsAny<CancellationToken>()),
+            Times.Once);
+        _passwordResetStoreMock.Verify(
+            m => m.UpdateDeliveryStateAsync(It.IsAny<string>(), PasswordResetDeliveryState.Failed, It.IsAny<CancellationToken>()),
+            Times.Never);
+    }
+
+    [Fact]
+    public async Task RequestReset_EmailSendFails_KeepsTokenAndMarksDeliveryFailed()
+    {
+        // Arrange
+        var user = new UserIdentity { Id = "user-1", Email = "found@example.com", SecurityStamp = "stamp" };
+        _userStoreMock.Setup(m => m.FindByEmailAsync("found@example.com", default))
+            .ReturnsAsync(user);
+        _passwordResetStoreMock.Setup(m => m.CountRecentRequestsAsync(user.Id, It.IsAny<DateTime>(), default))
+            .ReturnsAsync(0);
+
+        PasswordResetEntry? storedEntry = null;
+        _passwordResetStoreMock.Setup(m => m.StoreAsync(It.IsAny<PasswordResetEntry>(), default))
+            .Callback<PasswordResetEntry, CancellationToken>((entry, _) => storedEntry = entry)
+            .Returns(Task.CompletedTask);
+
+        // El mailer falla (SMTP caído, etc.)
+        _resetTokenMailerMock.Setup(m => m.SendResetEmailAsync("found@example.com", It.IsAny<string>(), default))
+            .ThrowsAsync(new InvalidOperationException("SMTP error"));
+
+        // Act
+        var result = await _sut.RequestPasswordResetAsync("found@example.com");
+
+        // Assert — el token NO se borra (diseño de reintento) y se marca como Failed
+        Assert.True(result);
+        Assert.NotNull(storedEntry);
+        Assert.Equal(PasswordResetDeliveryState.Pending, storedEntry.DeliveryState);
+        _passwordResetStoreMock.Verify(
+            m => m.UpdateDeliveryStateAsync(It.IsAny<string>(), PasswordResetDeliveryState.Failed, It.IsAny<CancellationToken>()),
+            Times.Once);
+        _passwordResetStoreMock.Verify(
+            m => m.UpdateDeliveryStateAsync(It.IsAny<string>(), PasswordResetDeliveryState.Dispatched, It.IsAny<CancellationToken>()),
+            Times.Never);
     }
 
     [Fact]
