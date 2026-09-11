@@ -300,13 +300,17 @@ public sealed class PasskeyService(
         {
             // Buscamos la credencial almacenada por su ID
             //
-            // DIDÁCTICA: El Id del autenticador llega en Base64 desde el navegador.
-            // Si el payload es malformado (Id no Base64 válido), Convert lanzaría
-            // FormatException que NO la captura el catch de Fido2VerificationException,
-            // propagándose como 500. Un Id malformado no puede referirse a una
-            // credencial existente, así que tratarlo como "no encontrada" preserva el
-            // contrato del método (siempre devuelve un PasskeyAssertionResult, nunca lanza).
-            var credentialIdBytes = TryDecodeBase64CredentialId(assertionResponse.Id);
+            // DIDÁCTICA (A-29): el navegador envía el Id de la credencial en dos formatos:
+            // - "id":     string Base64URL sin padding (RFC 4648 §5), p.ej. "-___".
+            // - "rawId":  byte[] que Fido2NetLib YA decodifica correctamente (Base64UrlConverter).
+            // El Id llega SIN padding y puede contener los caracteres '-'/'_', por lo que
+            // Convert.FromBase64String (Base64 estándar) lanzaba FormatException en casi todos
+            // los logins reales (los tests pasaban porque usaban Base64 estándar con padding).
+            // Se prefiere "rawId" (bytes autoritativos decodificados por la librería) y solo si
+            // no viene, se decodifica "id" con un decoder Base64URL tolerante.
+            // Un Id malformado no puede referirse a una credencial existente, así que tratarlo
+            // como "no encontrada" preserva el contrato del método (nunca lanza).
+            var credentialIdBytes = TryResolveCredentialId(assertionResponse);
             if (credentialIdBytes is null)
             {
                 logger.LogWarning(
@@ -396,7 +400,7 @@ public sealed class PasskeyService(
             UserIdentity? subject = null;
             try
             {
-                var credentialIdBytes = TryDecodeBase64CredentialId(assertionResponse.Id);
+                var credentialIdBytes = TryResolveCredentialId(assertionResponse);
                 if (credentialIdBytes is null)
                 {
                     return PasskeyAssertionResult.InvalidSignature(subject);
@@ -432,14 +436,33 @@ public sealed class PasskeyService(
     }
 
     /// <summary>
-    /// Decodifica el Id de credencial (Base64) de forma tolerante a payloads malformados.
+    /// Resuelve los bytes de la credencial desde la respuesta de assertion.
     /// </summary>
     /// <remarks>
-    /// DIDÁCTICA: Devuelve <c>null</c> si el valor está vacío o no es Base64 válido,
+    /// DIDÁCTICA (A-29): se prefiere <c>RawId</c> (byte[] decodificado por el
+    /// <c>Base64UrlConverter</c> de Fido2NetLib — Base64URL RFC 4648 §5 con/sin padding) porque
+    /// es la representación autoritativa. Si el cliente no envió <c>rawId</c> (algunos clients
+    /// mínimos solo envían <c>id</c>), se decodifica el string con un decoder Base64URL propio.
+    /// </remarks>
+    private static byte[]? TryResolveCredentialId(AuthenticatorAssertionRawResponse response)
+    {
+        if (response.RawId is { Length: > 0 })
+        {
+            return response.RawId;
+        }
+
+        return TryDecodeBase64UrlCredentialId(response.Id);
+    }
+
+    /// <summary>
+    /// Decodifica el Id de credencial (Base64URL) de forma tolerante a payloads malformados.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: Devuelve <c>null</c> si el valor está vacío o no es Base64URL válido,
     /// permitiendo tratar el caso como "credencial no encontrada" sin lanzar excepciones
     /// (un Id malformado no puede corresponder a una credencial del store).
     /// </remarks>
-    private static byte[]? TryDecodeBase64CredentialId(string? value)
+    private static byte[]? TryDecodeBase64UrlCredentialId(string? value)
     {
         if (string.IsNullOrWhiteSpace(value))
         {
@@ -448,7 +471,24 @@ public sealed class PasskeyService(
 
         try
         {
-            return Convert.FromBase64String(value);
+            // DIDÁCTICA (A-29): el navegador emite id/rawId en Base64URL (RFC 4648 §5):
+            // usa '-'/'_' en lugar de '+'/'/' y NO lleva padding. Convert.FromBase64String
+            // (Base64 estándar) rechazaría ambos casos. Normalizamos y añadimos el padding
+            // que falte para decodificar con el mismo Convert.
+            var normalized = value.Replace('-', '+').Replace('_', '/');
+            switch (normalized.Length % 4)
+            {
+                case 2:
+                    normalized += "==";
+                    break;
+                case 3:
+                    normalized += "=";
+                    break;
+                case 1:
+                    return null;
+            }
+
+            return Convert.FromBase64String(normalized);
         }
         catch (FormatException)
         {

@@ -39,8 +39,25 @@ public sealed class RequestSizeLimitMiddleware(
     /// </summary>
     public async Task InvokeAsync(HttpContext context)
     {
-        if (context.Request.Path.StartsWithSegments(pathPrefix))
+        if (context.Request.Path.StartsWithSegments(pathPrefix, out var remainingPath))
         {
+            // DIDÁCTICA (S4): los endpoints WebAuthn (/…/webauthn/*) transportan payloads FIDO2
+            // (clientDataJSON + attestationObject/authenticatorData en Base64URL) que superan el
+            // límite de 2048 bytes pensado para /login y friends. NO quedan ilimitados (A-29):
+            // se les asigna un tope explícito propio (MaxWebAuthnRequestBodySize, 64KB default)
+            // para acotar el buffer en memoria ante payloads arbitrarios.
+            if (remainingPath.StartsWithSegments("/webauthn", StringComparison.Ordinal))
+            {
+                var fidoFeature = context.Features.Get<IHttpMaxRequestBodySizeFeature>();
+                if (fidoFeature is not null && !fidoFeature.IsReadOnly)
+                {
+                    fidoFeature.MaxRequestBodySize = options.Value.MaxWebAuthnRequestBodySize;
+                }
+
+                await next(context);
+                return;
+            }
+
             var feature = context.Features.Get<IHttpMaxRequestBodySizeFeature>();
             if (feature is not null && !feature.IsReadOnly)
             {

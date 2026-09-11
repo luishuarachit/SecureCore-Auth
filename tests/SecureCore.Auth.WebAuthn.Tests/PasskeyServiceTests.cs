@@ -1,3 +1,4 @@
+using System.Linq;
 using Fido2NetLib;
 using Fido2NetLib.Objects;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -226,6 +227,69 @@ public class PasskeyServiceTests
         // Assert
         Assert.False(result.CredentialFound);
         _fido2.DidNotReceive().MakeAssertionAsync(Arg.Any<MakeAssertionParams>(), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CompleteAssertionDetailedAsync_Base64UrlUnpaddedId_ResolvesCredential()
+    {
+        // DIDÁCTICA (A-29): el navegador envía id en Base64URL sin padding (RFC 4648 §5), que
+        // puede contener '-'/'_' (≈99% de las credenciales aleatorias) y que Convert.FromBase64String
+        // rechazaba → el login real fallaba pese a tener la credencial almacenada.
+        // Bytes 0xFB 0xFF 0xFF → base64url "-___".
+        var credentialBytes = new byte[] { 0xFB, 0xFF, 0xFF };
+        _credentialStore.FindByCredentialIdAsync(
+                Arg.Is<byte[]>(b => b.SequenceEqual(credentialBytes)), Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromResult<StoredCredential?>(new StoredCredential
+            {
+                CredentialId = credentialBytes,
+                UserId = "u1",
+                PublicKey = new byte[] { 4 },
+                SignatureCount = 0
+            }));
+        _userStore.FindByIdAsync("u1", Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromResult<UserIdentity?>(new UserIdentity { Id = "u1", Email = "a@b.c", SecurityStamp = "s" }));
+        _fido2.MakeAssertionAsync(Arg.Any<MakeAssertionParams>(), Arg.Any<CancellationToken>())
+            .Returns(new VerifyAssertionResult { SignCount = 1 });
+
+        var response = new AuthenticatorAssertionRawResponse { Id = "-___" };
+
+        var result = await _passkeyService.CompleteAssertionDetailedAsync(response, Substitute.For<AssertionOptions>());
+
+        Assert.True(result.CredentialFound, "Un id Base64URL sin padding debe resolver la credencial");
+        Assert.True(result.SignatureValid);
+        Assert.Equal("u1", result.User!.Id);
+    }
+
+    [Fact]
+    public async Task CompleteAssertionDetailedAsync_PrefersRawId_WhenIdIsMalformed()
+    {
+        // DIDÁCTICA (A-29): rawId (byte[]) ya viene decodificado por el Base64UrlConverter de
+        // Fido2NetLib; si id es malformado pero rawId es válido, la credencial debe resolverse.
+        var credentialBytes = new byte[] { 1, 2, 3 };
+        _credentialStore.FindByCredentialIdAsync(credentialBytes, Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromResult<StoredCredential?>(new StoredCredential
+            {
+                CredentialId = credentialBytes,
+                UserId = "u1",
+                PublicKey = new byte[] { 4 },
+                SignatureCount = 0
+            }));
+        _userStore.FindByIdAsync("u1", Arg.Any<CancellationToken>())
+            .Returns(ValueTask.FromResult<UserIdentity?>(new UserIdentity { Id = "u1", Email = "a@b.c", SecurityStamp = "s" }));
+        _fido2.MakeAssertionAsync(Arg.Any<MakeAssertionParams>(), Arg.Any<CancellationToken>())
+            .Returns(new VerifyAssertionResult { SignCount = 1 });
+
+        var response = new AuthenticatorAssertionRawResponse
+        {
+            Id = "!!!not-base64!!!",
+            RawId = credentialBytes
+        };
+
+        var result = await _passkeyService.CompleteAssertionDetailedAsync(response, Substitute.For<AssertionOptions>());
+
+        Assert.True(result.CredentialFound);
+        Assert.True(result.SignatureValid);
+        Assert.Equal("u1", result.User!.Id);
     }
 
     [Fact]

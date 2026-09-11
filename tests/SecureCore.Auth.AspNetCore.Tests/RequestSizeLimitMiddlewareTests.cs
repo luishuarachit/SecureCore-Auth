@@ -40,6 +40,22 @@ public class RequestSizeLimitMiddlewareTests
     }
 
     [Fact]
+    public async Task WebAuthnPaths_GetDedicatedLargerCap()
+    {
+        // DIDÁCTICA (A-29): los payloads FIDO2 superan el límite de credenciales (2048 B) pero
+        // NO quedan ilimitados: se les asigna el tope propio MaxWebAuthnRequestBodySize (64 KB).
+        var feature = new TestMaxRequestBodySizeFeature { MaxRequestBodySize = 30_000_000 };
+        var httpContext = new DefaultHttpContext();
+        httpContext.Features.Set<IHttpMaxRequestBodySizeFeature>(feature);
+        httpContext.Request.Path = "/auth/webauthn/login/complete";
+
+        var middleware = CreateMiddleware(new PathString("/auth"));
+        await middleware.InvokeAsync(httpContext);
+
+        Assert.Equal(65536, feature.MaxRequestBodySize);
+    }
+
+    [Fact]
     public async Task NonAuthPath_DoesNotTouchMaxRequestBodySize()
     {
         var feature = new TestMaxRequestBodySizeFeature { MaxRequestBodySize = 30_000_000 };

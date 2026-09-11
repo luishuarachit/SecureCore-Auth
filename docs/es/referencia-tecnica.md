@@ -367,6 +367,42 @@ Servicio de registro y verificación de Passkeys (FIDO2/WebAuthn) para el login 
 
 > **SEGURIDAD** (v3.2.0): Un `Id` de credencial malformado (no Base64) se trata como "credencial no encontrada" y nunca lanza excepción. `CredentialFound` es un oráculo de existencia de credenciales — necesario por diseño para el lockout por cuenta — pero **no expongas esta distinción al cliente**: devuelve siempre el mismo error de autenticación genérico.
 
+#### 4.7.1. Resolución del credential ID (S4)
+
+- **`TryResolveCredentialId(response)`** prefiere `response.RawId` — `byte[]` ya decodificado por el `Base64UrlConverter` de Fido2NetLib — y solo recurre a `response.Id` (string) como fallback vía **`TryDecodeBase64UrlCredentialId`**:
+  - Normaliza Base64URL sin padding a Base64 estándar (`-`→`+`, `_`→`/`) y añade el padding sintético (`=`, `==`).
+  - Un `length % 4 == 1` (padding inválido), un string vacío o un `FormatException` se traducen en `null` (credencial no encontrada), nunca en excepción.
+  - `Convert.FromBase64String` estándar NO es Base64URL: el `Id` que envía el navegador (`-`/`_`, sin padding) fallaría ~100% de los casos. No lo uses sobre `response.Id`.
+
+#### 4.7.2. Configuración FIDO2 automática (S4)
+
+`AddWebAuthn()` registra con `TryAddSingleton`:
+
+| Servicio | Derivación |
+| :--- | :--- |
+| `Fido2Configuration` | `ServerDomain = WebAuthnOptions.RelyingPartyId`, `ServerName = RelyingPartyName`, `Origins = WebAuthnOptions.Origins` |
+| `Fido2` | Ctor `Fido2(Fido2Configuration, IMetadataService?)` (el metadata service se resuelve de DI si existe; opcional) |
+| `IFido2` | Same instance que `Fido2` |
+
+**Consecuencia de seguridad**: Fido2NetLib valida internamente el origin firmado en el `clientDataJSON` contra el `Fido2Configuration` del instance `Fido2`. Como ahora esa configuración se deriva de `WebAuthnOptions`, el origin verificado coincide con el que configuraste para la ceremonia — ya no hay config desacoplada del consumidor. `RelyingPartyId`/`RelyingPartyName` dejan de ser dead options.
+
+#### 4.7.3. Anti-enumeración en `BeginLoginAsync` (S4)
+
+- Por defecto (`DiscloseCredentialsInLoginBegin = false`) el oráculo de enumeración queda **cerrado**: `userId` no se propaga a `BeginAssertionAsync`, de modo que los `allowCredentials` no se filtran por usuario y la respuesta es idéntica para userIds existentes o no.
+- Al activarlo (`= true`), `BeginLoginAsync` pasa `userId: userId` al challenge, propagando los credential IDs del usuario al autenticador (permite "esta cuenta no tiene passkeys" en el cliente). **Riesgo**: oráculo de enrollment por barrido de userIds.
+
+#### 4.7.4. Rate limiting y payload (S4)
+
+- **`/webauthn/login/begin`**: limiter keyed `"webauthn-begin"` (default 30 intentos/min por IP, `SecureAuthOptions.WebAuthnBeginRateLimiter`).
+- **`/webauthn/login/complete`**: limiter keyed `"webauthn-complete"` (default 10 intentos/min por IP, `SecureAuthOptions.WebAuthnCompleteRateLimiter`); se resetea tras un login exitoso. La clave es `Connection.RemoteIpAddress` (IP real de la conexión TCP; leer la sección XFF — no usar el header como clave).
+- Si el host no registra los limiters (app sin `AddSecureAuth`), los endpoints degradan con gracia y no fallan.
+- **`/webauthn/*`**: `RequestSizeLimitMiddleware` asigna `MaxWebAuthnRequestBodySize` (default 65536 bytes, rango [4096, 1048576]) a `IHttpMaxRequestBodySizeFeature`. Los payloads FIDO2 (~KB) no dependen del tope de 2 KB de `/auth` ni quedan al default de Kestrel (~30 MB).
+
+#### 4.7.5. Challenges tipados por ceremonia (S4)
+
+- `StoreChallengeAsync` guarda con clave `"{tag}:{rawId}"` (`"register:…"` para registro, `"login:…"` para login); el `challengeId` devuelto al cliente es el `rawId` opaco.
+- Al consumir, el orquestador recompone la clave tipada según la ceremonia: reuso cross-ceremony (un challenge de registro presentado en login o viceversa) es **fail-closed** — no encuentra la entrada con la clave de la ceremonia esperada y rechaza antes del parseo de la respuesta del autenticador. Combina con el single-use atómico de `ISingleUseTokenStore` (reutilizar el mismo `challengeId` en la misma ceremonia también falla).
+
 ### 4.8. Anti-abuso por cuenta (S1, v3.2.0)
 Integración de `IAccountProtectionService` en los orquestadores. Se activa **únicamente** con
 `AddSecureAuthAccountProtection()` (que registra el servicio y enlaza `AccountProtectionOptions`

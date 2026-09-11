@@ -278,7 +278,7 @@ public sealed class IdentityOrchestrator(
                 userId, mfaResult.VerifiedMethod.Value.ToString().ToLowerInvariant(), cancellationToken);
         }
 
-        var customClaims = user.Claims ?? [];
+        var customClaims = new Dictionary<string, string>(user.Claims ?? []);
         if (mfaResult.VerifiedMethod.HasValue)
         {
             customClaims["amr"] = "mfa";

@@ -1068,6 +1068,33 @@ app.MapPost("/api/passkeys/login/complete", async (
 });
 ```
 
+#### Automatic FIDO2 configuration
+
+`AddWebAuthn` automatically registers `Fido2Configuration`, `Fido2`, and `IFido2` derived from the
+config you write above (`RelyingPartyId` → `ServerDomain`, `RelyingPartyName` → `ServerName`,
+`Origins`). You don't need to configure Fido2NetLib separately, and the `clientDataJSON` origin
+validation runs against **your** `WebAuthnOptions`.
+
+#### Anti-enumeration (privacy)
+
+By default, `login/begin` does not reveal which credentials each user has: `DiscloseCredentialsInLoginBegin
+= false` makes the login option identical for everyone. If you want the client to know whether an
+account already has passkeys (and pass the credential IDs to the authenticator), enable it with:
+
+```csharp
+.AddWebAuthn(webauthn =>
+{
+    webauthn.DiscloseCredentialsInLoginBegin = true; // enrollment oracle, use with care
+});
+```
+
+#### Abuse protection
+
+The `/webauthn/login/begin` and `/webauthn/login/complete` endpoints are IP-rate-limited by default
+(30 and 10 attempts/minute respectively) and the `/webauthn/*` body has its own 64 KB cap
+(`SecureAuthOptions.MaxWebAuthnRequestBodySize`). No configuration is needed to make them work; the
+limits are configurable if you need different values.
+
 ---
 
 ### Domain Events (Observability)

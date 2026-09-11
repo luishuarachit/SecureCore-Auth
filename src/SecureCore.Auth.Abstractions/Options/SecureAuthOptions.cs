@@ -274,6 +274,48 @@ public class SecureAuthOptions
         new() { MaxAttempts = 5, Window = TimeSpan.FromHours(1) };
 
     /// <summary>
+    /// Configuración del rate limiting por IP para el paso "begin" de los endpoints anónimos
+    /// WebAuthn (A-29). Por defecto: 30 solicitudes por minuto por IP.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA (A-29): /webauthn/login/begin es anónimo y barato para el atacante (genera un
+    /// challenge aleatorio y lo persiste), pero un flood puede saturar el almacén de challenges
+    /// (Storage DoS). Sin embargo, es más barato que una verificación criptográfica, por eso el
+    /// presupuesto "begin" es más holgado que el de "complete". Se registra como un limiter
+    /// keyed ("webauthn-begin") independiente del de login para no compartir presupuesto.
+    /// </remarks>
+    public RateLimiterOptions? WebAuthnBeginRateLimiter { get; set; } =
+        new() { MaxAttempts = 30, Window = TimeSpan.FromMinutes(1) };
+
+    /// <summary>
+    /// Configuración del rate limiting por IP para el paso "complete" de los endpoints anónimos
+    /// WebAuthn (A-29). Por defecto: 10 solicitudes por minuto por IP.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA (A-29): /webauthn/login/complete consume el challenge y ejecuta verificación
+    /// criptográfica (firma ECDSA/RSA) → CPU DoS si no se limita. Además cada assertion fallida
+    /// de una credencial conocida consume el presupuesto del scope Passkey (S1). Se registra como
+    /// un limiter keyed ("webauthn-complete") con presupuesto estricto.
+    /// </remarks>
+    public RateLimiterOptions? WebAuthnCompleteRateLimiter { get; set; } =
+        new() { MaxAttempts = 10, Window = TimeSpan.FromMinutes(1) };
+
+    /// <summary>
+    /// Límite máximo (en bytes) del cuerpo de las solicitudes a los endpoints WebAuthn
+    /// (/…/webauthn/*). Por defecto: 65536 bytes (64 KB).
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA (A-29): los payloads FIDO2 (clientDataJSON + attestationObject/authenticatorData
+    /// en Base64URL) superan el límite de credenciales (<see cref="MaxAuthRequestBodySize"/>,
+    /// 2048 B, pensado para /login y friends), pero NO deben quedar sin tope: una attestation
+    /// legítima de packed/TPM ronda los 1-8 KB. 64 KB es holgado y acota el buffer en memoria
+    /// frente a payloads arbitrarios. Lo aplica <c>UseSecureAuthRequestSizeLimit</c> en la rama
+    /// de ruta /…/webauthn/* (defensa de capa física, A-10).
+    /// </remarks>
+    [Range(4096, 1048576, ErrorMessage = "El límite de tamaño del cuerpo WebAuthn debe estar entre 4096 y 1048576 bytes.")]
+    public int MaxWebAuthnRequestBodySize { get; set; } = 65536;
+
+    /// <summary>
     /// Límite máximo (en bytes) del cuerpo de las solicitudes a los endpoints de
     /// autenticación anónimos (login, refresh, forgot-password, reset-password).
     /// Por defecto: 2048 bytes (2 KB).

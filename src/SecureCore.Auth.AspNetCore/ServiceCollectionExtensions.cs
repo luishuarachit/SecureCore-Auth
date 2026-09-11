@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using Fido2NetLib;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -94,18 +95,84 @@ public class SecureAuthBuilder(IServiceCollection services)
     }
 
     /// <summary>
-    /// Habilita la autenticación con WebAuthn/Passkeys.
+    /// Habilita la autenticación con WebAuthn/Passkeys de primera clase (S4).
     /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: registra <c>PasskeyService</c> (ceremonias FIDO2), <c>WebAuthnOrchestrator</c>
+    /// (ciclo de vida del challenge single-use vía S2, origin check, anti-abuso S1 scope
+    /// Passkey y emisión de tokens) y el challenge store por defecto sobre
+    /// <c>ISingleUseTokenStore</c>. Opt-in: sin este registro, los endpoints
+    /// /auth/webauthn/* responden 503.
+    ///
+    /// El consumidor de la app debe registrar los SPIs restantes (<c>ICredentialStore</c>,
+    /// <c>IUserStore</c>, <c>ISessionStore</c>, <c>ITokenService</c>) y configurar
+    /// <c>SecureAuth:WebAuthn</c> (RelyingPartyId, Origins…). <c>IFido2</c> se registra por
+    /// defecto derivado de WebAuthnOptions (A-29): si el consumidor registra el suyo antes
+    /// (p.ej. vía <c>AddFido2</c>), TryAdd lo respeta. Para usar los
+    /// endpoints, mapee <c>app.MapSecureAuthWebAuthnEndpoints()</c>.
+    /// </remarks>
     /// <param name="configure">Acción para configurar WebAuthn.</param>
     /// <returns>El builder para encadenamiento.</returns>
     public SecureAuthBuilder AddWebAuthn(Action<WebAuthnOptions>? configure = null)
     {
-        if (configure is not null)
-        {
-            Services.Configure(configure);
-        }
+        // DIDÁCTICA: el patrón de opciones sigue a AddVerifyAction/AddPasswordReset:
+        // BindConfiguration + PostConfigure fusiona la acción con la configuración.
+        Services.AddOptions<WebAuthnOptions>()
+            .BindConfiguration(WebAuthnOptions.SectionName)
+            .PostConfigure(opt =>
+            {
+                if (configure is not null)
+                {
+                    var overrides = new WebAuthnOptions();
+                    configure(overrides);
+                    opt.RelyingPartyName = overrides.RelyingPartyName;
+                    opt.RelyingPartyId = overrides.RelyingPartyId;
+                    opt.Origins = overrides.Origins;
+                    opt.ChallengeTimeoutSeconds = overrides.ChallengeTimeoutSeconds;
+                    opt.AuthenticatorAttachment = overrides.AuthenticatorAttachment;
+                    opt.UserVerification = overrides.UserVerification;
+                    opt.RequireResidentKey = overrides.RequireResidentKey;
+                    opt.DiscloseCredentialsInLoginBegin = overrides.DiscloseCredentialsInLoginBegin;
+                    opt.OpenMfaVerifiedWindowOnPasskeyLogin = overrides.OpenMfaVerifiedWindowOnPasskeyLogin;
+                }
+            })
+            .ValidateOnStart();
 
+        // DIDÁCTICA (S2): el challenge store consume su entrada con la primitiva single-use
+        // atómica (S2). Garantizamos el default aquí por si AddSecureAuth no lo registró.
+        Services.TryAddScoped<ISingleUseTokenStore, DistributedCacheSingleUseTokenStore>();
+        Services.TryAddScoped<IWebAuthnChallengeStore, DistributedCacheWebAuthnChallengeStore>();
         Services.AddScoped<SecureCore.Auth.WebAuthn.PasskeyService>();
+        Services.AddScoped<SecureCore.Auth.WebAuthn.WebAuthnOrchestrator>();
+
+        // DIDÁCTICA (A-29): FIDO2 necesita conocer la identidad del Relying Party (dominio y
+        // orígenes) para verificar el clientDataJSON firmado (origin) y el RP hash dentro de la
+        // ceremonia. Esa verificación la ejecuta Fido2NetLib contra el Fido2Configuration del
+        // INSTANCE Fido2 que recibe PasskeyService (MakeAssertionAsync/MakeNewCredentialAsync le
+        // pasan su _config interno). Sin este registro, la seguridad del origin dependía de una
+        // AddFido2 AJENA al consumidor → doble fuente de verdad y riesgo de desincronización con
+        // WebAuthnOptions (anti-phishing debilitado o login roto), además de un IFido2 ausente que
+        // reventaba el pipeline con 500.
+        //
+        // Regístramos por defecto un Fido2Configuration DERIVADO de WebAuthnOptions (ServerDomain =
+        // RelyingPartyId, ServerName = RelyingPartyName, Origins = WebAuthnOptions.Origins) y el
+        // Fido2 resultante. Así WebAuthnOptions pasa a ser la FUENTE ÚNICA de identidad del RP.
+        // TryAdd respeta un Fido2Configuration/IFido2 registrado por el consumidor ANTES
+        // (personalización explícita conservada).
+        Services.TryAddSingleton<Fido2Configuration>(sp =>
+        {
+            var opts = sp.GetRequiredService<IOptions<WebAuthnOptions>>().Value;
+            return new Fido2Configuration
+            {
+                ServerDomain = opts.RelyingPartyId,
+                ServerName = opts.RelyingPartyName,
+                Origins = opts.Origins
+            };
+        });
+        Services.TryAddSingleton(sp => new Fido2(
+            sp.GetRequiredService<Fido2Configuration>(),
+            sp.GetService<IMetadataService>()));
+        Services.TryAddSingleton<IFido2>(sp => sp.GetRequiredService<Fido2>());
         return this;
     }
 
@@ -535,6 +602,29 @@ public static class ServiceCollectionExtensions
             return new InMemoryRateLimiter(
                 forgotOptions?.MaxAttempts ?? 5,
                 forgotOptions?.Window ?? TimeSpan.FromHours(1));
+        });
+
+        // DIDÁCTICA (A-29): rate limiters DEDICADOS para los endpoints anónimos WebAuthn
+        // (/login/begin y /login/complete). Usan keyed DI para tener presupuestos independientes
+        // del de login y entre sí (begin: farming de challenges → más holgado; complete:
+        // verificación criptográfica → estricto). En multi-instancia, el implementador puede
+        // reemplazarlos con implementaciones distribuidas:
+        //   services.AddKeyedSingleton<IRateLimiter>("webauthn-begin", (sp, _) => new RedisRateLimiter(...));
+        services.TryAddKeyedSingleton<IRateLimiter>("webauthn-begin", (sp, _) =>
+        {
+            var authOptions = sp.GetRequiredService<IOptions<SecureAuthOptions>>().Value;
+            var options = authOptions.WebAuthnBeginRateLimiter;
+            return new InMemoryRateLimiter(
+                options?.MaxAttempts ?? 30,
+                options?.Window ?? TimeSpan.FromMinutes(1));
+        });
+        services.TryAddKeyedSingleton<IRateLimiter>("webauthn-complete", (sp, _) =>
+        {
+            var authOptions = sp.GetRequiredService<IOptions<SecureAuthOptions>>().Value;
+            var options = authOptions.WebAuthnCompleteRateLimiter;
+            return new InMemoryRateLimiter(
+                options?.MaxAttempts ?? 10,
+                options?.Window ?? TimeSpan.FromMinutes(1));
         });
 
         // DIDÁCTICA: Registro del mecanismo de locks para operaciones críticas.
