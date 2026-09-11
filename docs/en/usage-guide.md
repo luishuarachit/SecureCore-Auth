@@ -970,6 +970,85 @@ without S1. Changing the password also guards against current-password brute for
 
 ---
 
+### Use Case 11: Recovery codes (backup codes) — v3.2.0, F5
+
+**Scenario**: the user lost their phone (TOTP) and needs to access their account with an
+**emergency single-use credential**.
+
+**Setup** (first-class recovery codes under `AddMfa()`; defaults are safe):
+
+```csharp
+builder.Services.AddSecureAuth(options => { ... })
+    .AddMfa(o =>
+    {
+        o.EnableRecoveryCodes = true;               // late-bound: validated on each call
+        o.RecoveryCodeCount = 10;                   // codes per batch
+        o.RecoveryCodeLifetimeDays = 90;            // codes expire (1..365)
+    });
+
+// Dedicated mapper (optional; verify/use are anonymous but tutored):
+app.MapSecureAuthRecoveryCodesEndpoints("/auth/recovery-codes");
+```
+
+**Step 1 — The user generates their batch** (authenticated; codes are shown ONCE):
+
+```http
+POST /auth/recovery-codes/generate
+Authorization: Bearer ...
+// 200 → { "codes": ["ABCD-EFGH-...", "...", "..."] }
+```
+
+> Only SHA-256 hashes are persisted; the plaintext CANNOT be re-fetched. Regenerating invalidates
+> the previous batch entirely.
+
+**Step 2 — The user loses their second factor and authenticates with a backup code**.
+The flow is anonymous but the account is resolved from the `mfaSessionToken` of the in-progress
+login (never from a `userId` in the body), and the code is consumed **atomically** (single-use):
+
+```http
+POST /auth/recovery-codes/verify { "mfaSessionToken": "eyJ...", "code": "ABCD-EFGH..." }
+// 200 → { "valid": true }   (does NOT consume the code)
+
+POST /auth/recovery-codes/use { "mfaSessionToken": "eyJ...", "code": "ABCD-EFGH..." }
+// 200 → { "redeemed": true } (consumes the code)
+```
+
+**Step 3 — The host completes the login**. The framework provides
+`IdentityOrchestrator.CompleteMfaLoginWithRecoveryCodeAsync`: it redeems the code (single-use),
+consumes the session token, issues the tokens with the `mfa_method=recovery` mark and, if you ask
+for it (`rotateSecurityStamp: true`), rotates the SecurityStamp and revokes ALL previous
+sessions — **recommended** after a lost/stolen MFA device:
+
+```csharp
+// (in your MFA flow, when the user presents a recovery code)
+var (result, tokens) = await identityOrchestrator.CompleteMfaLoginWithRecoveryCodeAsync(
+    mfaSessionToken,
+    recoveryCode,
+    rotateSecurityStamp: true,      // host policy; true after loss/theft
+    ct);
+
+if (result.Succeeded)
+{
+    return Results.Ok(tokens);      // tokens with amr=mfa and mfa_method=recovery
+}
+```
+
+> **DIDACTIC (A1, audit)**: do NOT try `CompleteMfaLoginAsync` with the recovery code: that
+> method validates the code against the TOTP/email flow and a recovery code will never pass.
+> `CompleteMfaLoginWithRecoveryCodeAsync` is the correct (and safe) path to close the login.
+
+**Protections** (S1 + S2): the code is atomic single-use, expires in `RecoveryCodeLifetimeDays` and
+only its hash is stored. Failures of `verify`/`use` count against the `Recovery` scope of S1
+(3 attempts by default); when locked, `use` answers 429 `too_many_attempts`. `verify` does not
+distinguish "nonexistent code" from "already used" or "locked account" (anti-enumeration), and
+`use` answers the same generic 400 `invalid_code`.
+
+> **DIDACTIC — When are they useful?**: they are the **last line of defense** when the main second
+> factor is unavailable (lost/stolen device). Store them outside the app (password manager) and
+> treat them as high-sensitivity credentials: rotate the SecurityStamp if you suspect a leak.
+
+---
+
 ## Advanced Features
 
 ### Passkeys / WebAuthn
@@ -1121,6 +1200,9 @@ SecureCore Auth emits events every time something important happens. You can cap
 | `Logout` | Individual logout | Auditing |
 | `PasswordResetRequested` | Reset request initiated | Optional secondary email notification |
 | `PasswordResetCompleted` | Password changed successfully | Security notification |
+| `RecoveryCodesGenerated` (v3.2.0) | Recovery code batch generated | Notify that backup codes were issued |
+| `RecoveryCodeRedeemed` (v3.2.0) | Recovery code consumed | Alert on access via an emergency code |
+| `RecoveryCodeVerificationFailed` / `RecoveryCodeRedemptionFailed` (v3.2.0) | Verification/redemption failed without lockout | Detect attempts to use stolen codes |
 | `MfaEnrolled` | MFA successfully enrolled | Confirmation to user |
 | `MfaVerificationSuccess` | MFA verification passed | Audit logging |
 | `MfaVerificationFailed` | MFA verification failed | Intrusion detection |
@@ -1242,8 +1324,14 @@ builder.Services.AddSecureAuth(options =>
     // Allow users to disable their MFA?
     options.Auth.Mfa.AllowUserDisable = true;
 
-    // Recovery codes (NOT RECOMMENDED)
+    // Emergency recovery codes (first-class since v3.2.0, F5)
     options.Auth.Mfa.EnableRecoveryCodes = false;
+    // options.Auth.Mfa.RecoveryCodeCount = 10;        // codes per batch
+    // options.Auth.Mfa.RecoveryCodeLifetimeDays = 90; // expiry in days (1..365)
+
+    // ═══ Per-IP rate limiting for /recovery-codes/verify and /use (B1, audit) ═══
+    // options.Auth.RecoveryVerifyRateLimiter = new() { MaxAttempts = 10, Window = TimeSpan.FromMinutes(1) };
+    // options.Auth.RecoveryUseRateLimiter = new() { MaxAttempts = 5, Window = TimeSpan.FromMinutes(1) };
 
     // Issuer for TOTP QR code
     options.Auth.Mfa.TotpIssuer = "MyApp";

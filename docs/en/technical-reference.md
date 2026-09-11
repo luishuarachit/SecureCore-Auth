@@ -287,6 +287,28 @@ the default is registered with `TryAddScoped`). Keys carry the caller's per-cont
   `EmailServiceEmailOtpSender` (adapter over `IEmailService`). Register your own implementation
   BEFORE `AddVerifyAction()` to override it (TryAdd).
 
+### 3.8. IRecoveryCodeStore (v3.2.0, F5)
+
+Persistence SPI for first-class recovery codes (A-18/A-20). The orchestrator
+(`RecoveryCodeOrchestrator`) NEVER sees the plaintext code: it only receives/provides SHA-256
+hashes (lowercase hex) and delegates **atomic single-use** to `ISingleUseTokenStore` (S2).
+
+- `ValueTask CreateAsync(string userId, string codeHash, TimeSpan ttl, CancellationToken ct)` — persists a pending redemption code with its TTL (`MfaOptions.RecoveryCodeLifetimeDays`).
+- `ValueTask<RecoveryCodeStatus> GetStatusAsync(string userId, string codeHash, CancellationToken ct)` — **non-consuming peek**: distinguishes `Valid` / `AlreadyUsed` / `Invalid` without spending the code (see DIDÁCTICA in §4.10 on why the SPI has 4 methods).
+- `ValueTask<bool> RedeemAsync(string userId, string codeHash, CancellationToken ct)` — consumes **atomically** (delegates to `ISingleUseTokenStore.GetAndRemoveAsync`); returns `true` exactly once. Redemption is additionally serialized with a per-code `IOperationLock` (A2, audit): closes the TOCTOU window of the default S2 (non-atomic GET + REMOVE) in single-instance. For multi-instance an atomically-consuming S2 (Redis GETDEL/Lua) is still required.
+- `Task InvalidatePendingAsync(string userId, CancellationToken ct)` — invalidates the user's pending codes when a batch is regenerated (already-consumed codes have no S2 token to invalidate).
+
+**Default**: `DistributedCacheRecoveryCodeStore` over `IDistributedCache` with two keys:
+- S2 token per code: `"recovery:code:{userId}|{hash}"` (value = hash; `|` delimiter — the hash is always a fixed 64-hex suffix, so the key is unambiguous even if the userId contains the separator) — the **security guarantee** (atomic single-use).
+- Per-user JSON index: `"recovery:index:{userId}"` (list of `{hash, used}`) — only to distinguish `AlreadyUsed` vs `Invalid` in `GetStatusAsync`.
+
+**Write ordering**: the index is written FIRST and the S2 token SECOND. If the process dies
+between both writes during a regeneration, the index points to codes whose token does not exist
+→ **no orphan redeemable codes**. `RedeemAsync` decides ONLY by the S2 token (single-use
+guaranteed); the `used` flag in the index is best-effort (audit/state). When `AddMfa()` registers,
+the default is registered with `TryAddScoped`: implement your own distributed version
+(Redis GETDEL/Lua) BEFORE `AddSecureAuth()` and the orchestrator will use it automatically.
+
 ---
 
 ## 4. Core Services (API)
@@ -297,6 +319,7 @@ Coordinates the authentication flow. It contains no cryptographic logic but orch
 - **`SignInWithPasswordAsync(email, password)`**: Executes lookup, lockout validation, constant-time hashing, and token generation.
   - Implements `VerifyDummyPassword` to mitigate timing attacks if the user is not found.
 - **`SignInExternalAsync(provider, providerKey)`**: Processes login for users authenticated via OAuth (Google, GitHub, etc.). Links external identity with a local session.
+- **`CompleteMfaLoginWithRecoveryCodeAsync(mfaSessionToken, recoveryCode, rotateSecurityStamp, ct)`** (v3.2.0, A1 F5 audit): completes login with an already-redeemed recovery code. Unlike `CompleteMfaLoginAsync` (which requires a TOTP/email `mfaCode`), this flow redeems the recovery code (single-use via `RecoveryCodeOrchestrator.UseAsync`), consumes the session token, issues tokens with `amr=mfa`/`mfa_method=recovery` and opens the `mfa_verified` window (S3 parity). The `rotateSecurityStamp` flag (host policy) rotates the SecurityStamp, invalidates its cache and revokes **all** previous sessions (recommended after a lost/stolen MFA device); with `false`, the current session and stamp are kept. The S1 lockout (scope `Recovery`) maps to a generic login failure (cause not revealed). Requires `AddMfa()` (returns `Failed` without a registered `RecoveryCodeOrchestrator`).
 
 ### 4.2. ITokenService (JwtTokenService)
 Responsible for token generation and validation.
@@ -544,6 +567,36 @@ MFA login — a failed MFA attempt never opens it. The window is **additive**: w
 > `/create-password` and `/change-password` endpoints return the **new token pair** in the body
 > (`success.tokens`) so the client adopts the new family.
 
+### 4.10. First-class recovery codes (F5, v3.2.0)
+
+Emergency recovery codes as **first-class citizens** (A-18/A-20), not a plain hashed string
+forgotten in the MFA flow (legacy `MfaOrchestrator.SetRecoveryCodesAsync`).
+
+**`RecoveryCodeOrchestrator`** — `AddMfa()` always registers it; `EnableRecoveryCodes` is
+**late-bound** and validated on each call (a host that does not want it simply does not map the
+§5.3 endpoints).
+
+| Method | Behavior |
+| :--- | :--- |
+| `GenerateAsync(userId)` | Validates `EnableRecoveryCodes`; defensive guard `RecoveryCodeCount >= 1` (B5, audit: an invalid count does NOT invalidate the previous batch); generates `RecoveryCodeCount` CSPRNG codes, hashes each one (SHA-256 lowercase hex; cheap `RecoveryCodeMaxLength = 128` rejection before hashing), persists ONLY hashes with TTL `MfaOptions.RecoveryCodeLifetimeDays` (default 90, range [1,365]), invalidates the previous batch (`InvalidatePendingAsync`) and fires `RecoveryCodesGenerated`. Returns the plaintext codes **exactly once**. Regeneration is **serialized per user** with `IOperationLock` (B2, audit): two concurrent `GenerateAsync` calls (double-click) cannot interleave the index and leave a batch of orphan redeemable S2 tokens. |
+| `VerifyAsync(userId, code)` | Hash + `GetStatusAsync` (non-consuming peek). `IsValid` only when the code is redeemable. With S1, each failure spends the `Recovery` scope; a locked scope returns not-valid (generic, without revealing the lockout). Success → `RecordSuccessAsync`. A failure that does NOT trigger a lockout fires `RecoveryCodeVerificationFailed` (B3, audit). |
+| `UseAsync(userId, code)` | Hash + `RedeemAsync` (single-use via S2, serialized with per-code `IOperationLock` — A2, audit). Success → `RecoveryCodeRedeemed` + `RecordSuccessAsync` (clears the `Recovery` scope). Failure → `RecordFailureAsync`; the lockout-triggering failure returns `LockedOut` (→ 429 in the endpoint) and fires `AccountLockedOut` with metadata `scope=recovery`, `reason=lock_triggered`; the failure that does NOT trigger a lockout fires `RecoveryCodeRedemptionFailed` (B3, audit). |
+
+**New events**: `RecoveryCodesGenerated`, `RecoveryCodeRedeemed`, `RecoveryCodeVerificationFailed`, `RecoveryCodeRedemptionFailed` (see §6.1).
+
+> **DIDÁCTICA — Why does the SPI have 4 methods when the F5 plan asked for 3?** The plan
+> (Task 5.1) defined `Create`/`Redeem`/`Invalidate`. Without `GetStatusAsync`, `VerifyAsync`
+> cannot distinguish "redeemable" from "already used" WITHOUT CONSUMING the code (and
+> `RedeemAsync` must remain the only consumption path). The non-consuming peek is the piece that
+> makes pre-login verification viable without spending the emergency code.
+
+> **DIDÁCTICA — The business flow belongs to the HOST (A1, F5 audit)**: the `use` endpoint
+> consumes the code and fires the event, but completing the login is
+> **`IdentityOrchestrator.CompleteMfaLoginWithRecoveryCodeAsync`** (§4.1) — the host must NOT
+> re-implement token issuance by hand: `CompleteMfaLoginAsync` requires a TOTP/email code and
+> cannot verify a recovery code. The `mfaSessionToken` is validated in `use`/`verify` WITHOUT
+> being consumed so the host can reuse it later in that flow.
+
 ---
 
 ## 5. Middleware and Integration Endpoints
@@ -580,6 +633,20 @@ claim; responses use generic messages; 503 when the orchestrator is not register
 - `POST /create-password`: `{ newPassword }` — creates a password (requires an open step-up window; no `otp` in the body).
 - `POST /change-password`: `{ currentPassword, newPassword }` — changes the password (no step-up).
 
+**F5 (v3.2.0) — opt-in recovery codes** (dedicated mapper
+`MapSecureAuthRecoveryCodesEndpoints(prefix = "/auth/recovery-codes")`; requires `AddMfa()`;
+generic, anti-enumeration responses; 503 when the orchestrator is not registered):
+
+- `POST /generate`: authenticated — regenerates the batch and returns the plaintext codes **exactly once** (400 `recovery_codes_disabled` when `EnableRecoveryCodes=false`).
+- `POST /verify`: anonymous, `{ mfaSessionToken, code }` — checks whether the code is redeemable **without consuming it**; responds `{ valid }` (anti-enumeration: invalid token/code answer identically). Per-IP rate limited with the keyed budget `"recovery-verify"` (`SecureAuthOptions.RecoveryVerifyRateLimiter`, default 10/min; B1, audit).
+- `POST /use`: anonymous, `{ mfaSessionToken, code }` — consumes the code (atomic single-use); 200 `{ redeemed: true }`, 429 `too_many_attempts` when the `Recovery` scope is locked, 400 generic `invalid_code`. Per-IP rate limited with the keyed budget `"recovery-use"` (`SecureAuthOptions.RecoveryUseRateLimiter`, default 5/min; B1, audit). Success resets the per-IP budget (does not penalize the legitimate user).
+
+> **DIDÁCTICA — why a dedicated mapper and not inside `MapSecureAuthEndpoints`**: it follows the
+> precedent of `MapSecureAuthWebAuthnEndpoints` (S4): each opt-in MFA subdomain groups its routes in
+> its own method. Also, `verify`/`use` are anonymous but tutored: the account is resolved from the
+> `mfaSessionToken` (never from a `userId` in the body), preventing probing codes against arbitrary
+> accounts.
+
 ---
 
 ## 6. Security and Observability
@@ -598,6 +665,8 @@ The system dispatches asynchronous domain events via `IAuthEventDispatcher`. The
 - `PasswordResetRequested`: Reset request initiated by email.
 - `PasswordResetCompleted`: Successful password change via token.
 - `MfaEnrolled` / `MfaDisabled` / `MfaVerificationSuccess` / `MfaVerificationFailed`: MFA flow events.
+- `RecoveryCodesGenerated` / `RecoveryCodeRedeemed` (v3.2.0, F5): recovery code batch generated / code redeemed (consumed) successfully.
+- `RecoveryCodeVerificationFailed` / `RecoveryCodeRedemptionFailed` (v3.2.0, F5): recovery code verification/redemption failed without triggering a lockout (B3, audit; parity with `MfaVerificationFailed`).
 - `AnonymousLoginFailed` (v3.1.5): Login attempt with non-existent email/user. `UserId = null`, no sensitive data in Metadata (anti-enumeration).
 - `RateLimitExceeded` (v3.1.5): IP rate limit exceeded on `/auth/login`. `UserId = null`.
 - `PasskeyVerificationFailed`, `SecurityStampChanged`, `PasswordChangeFailed` (v3.1.5): Reserved for future use.

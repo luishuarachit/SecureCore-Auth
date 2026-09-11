@@ -104,5 +104,17 @@ public enum AuthEventType
     SecurityStampChanged,
 
     /// <summary>Cambio de contraseña fallido (contraseña actual incorrecta).</summary>
-    PasswordChangeFailed
+    PasswordChangeFailed,
+
+    /// <summary>Se generó un lote nuevo de recovery codes (F5, A-20).</summary>
+    RecoveryCodesGenerated,
+
+    /// <summary>Un recovery code fue redimido (consumido) satisfactoriamente (F5, A-20).</summary>
+    RecoveryCodeRedeemed,
+
+    /// <summary>Verificación de un recovery code fallida (código no redimible) sin disparar lockout (F5).</summary>
+    RecoveryCodeVerificationFailed,
+
+    /// <summary>Redención de un recovery code fallida (código erróneo/expirado/ya usado) sin disparar lockout (F5).</summary>
+    RecoveryCodeRedemptionFailed
 }

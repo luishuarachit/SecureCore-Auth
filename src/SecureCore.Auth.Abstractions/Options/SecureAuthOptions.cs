@@ -301,6 +301,33 @@ public class SecureAuthOptions
         new() { MaxAttempts = 10, Window = TimeSpan.FromMinutes(1) };
 
     /// <summary>
+    /// Configuración del rate limiting por IP para <c>/auth/recovery-codes/verify</c>
+    /// (anónimo). Por defecto: 10 solicitudes por minuto por IP.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA (B1, auditoría F5): verify es ANÓNIMO y cada intento ejecuta validación JWT del
+    /// <c>mfaSessionToken</c> (RS256/ES256, costosa) + lecturas al caché. Sin límite por IP, un
+    /// atacante amplifica CPU/caché con payloads mínimos, incluso sin tocar el presupuesto S1 por
+    /// cuenta (que es opt-in). El limiter es keyed ("recovery-verify"), independiente del de login.
+    /// </remarks>
+    public RateLimiterOptions? RecoveryVerifyRateLimiter { get; set; } =
+        new() { MaxAttempts = 10, Window = TimeSpan.FromMinutes(1) };
+
+    /// <summary>
+    /// Configuración del rate limiting por IP para <c>/auth/recovery-codes/use</c>
+    /// (anónimo). Por defecto: 5 solicitudes por minuto por IP.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA (B1, auditoría F5): use consume el código (single-use vía S2) y, si falla, el
+    /// presupuesto S1 del scope Recovery. Es el endpoint más sensible del flujo: presupuesto por
+    /// IP más estricto que verify (5/min) para acotar el brute-force distribuido y la carga al
+    /// caché/BD. El limiter es keyed ("recovery-use"). En éxito se resetea para no penalizar al
+    /// usuario legítimo (mismo patrón que /auth/login).
+    /// </remarks>
+    public RateLimiterOptions? RecoveryUseRateLimiter { get; set; } =
+        new() { MaxAttempts = 5, Window = TimeSpan.FromMinutes(1) };
+
+    /// <summary>
     /// Límite máximo (en bytes) del cuerpo de las solicitudes a los endpoints WebAuthn
     /// (/…/webauthn/*). Por defecto: 65536 bytes (64 KB).
     /// </summary>

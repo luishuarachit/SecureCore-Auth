@@ -39,13 +39,17 @@ public sealed class IdentityOrchestrator(
     ILogger<IdentityOrchestrator> logger,
     IAccountProtectionService? accountProtectionService = null,
     IOptions<AccountProtectionOptions>? accountProtectionOptions = null,
-    IMfaVerifiedSessionStore? mfaVerifiedSessionStore = null)
+    IMfaVerifiedSessionStore? mfaVerifiedSessionStore = null,
+    RecoveryCodeOrchestrator? recoveryCodeOrchestrator = null,
+    SecurityStampValidator? stampValidator = null)
 {
     private readonly SecureAuthOptions _options = options.Value;
     private readonly MfaOptions _mfaOptions = mfaOptions.Value;
     private readonly IAccountProtectionService? _accountProtection = accountProtectionService;
     private readonly AccountProtectionOptions? _accountProtectionOptions = accountProtectionOptions?.Value;
     private readonly IMfaVerifiedSessionStore? _mfaVerifiedSessionStore = mfaVerifiedSessionStore;
+    private readonly RecoveryCodeOrchestrator? _recoveryCodeOrchestrator = recoveryCodeOrchestrator;
+    private readonly SecurityStampValidator? _stampValidator = stampValidator;
 
     /// <summary>
     /// true cuando el subsistema S1 está registrado Y habilitado (opt-in, D-03).
@@ -309,6 +313,135 @@ public sealed class IdentityOrchestrator(
 
         return (SignInResult.Success, tokens);
     }
+
+    /// <summary>
+    /// Completa el login tras la redención de un recovery code (F5, A-20).
+    /// </summary>
+    /// <param name="mfaSessionToken">Token de sesión MFA emitido tras el login con contraseña.</param>
+    /// <param name="recoveryCode">Recovery code en texto plano a redimir (single-use atómico).</param>
+    /// <param name="rotateSecurityStamp">
+    /// true para rotar el SecurityStamp y revocar TODAS las sesiones previas (política recomendada
+    /// cuando el recovery code se usa por pérdida/robo del dispositivo MFA); false para mantener la
+    /// sesión y el stamp actuales (por ejemplo, si el host ya rotó el stamp en su flujo).
+    /// </param>
+    /// <param name="cancellationToken">Token de cancelación.</param>
+    /// <returns>Tokens de acceso con la marca <c>mfa_method=recovery</c>, o fallo genérico.</returns>
+    /// <remarks>
+    /// DIDÁCTICA (A1, auditoría F5): <see cref="CompleteMfaLoginAsync"/> exige un <c>mfaCode</c>
+    /// que pase <c>mfaService.VerifyAsync</c> (TOTP/email), por lo que NO sirve para un recovery
+    /// code. Este método cierra el flujo A-20 completo: valida el token (sin consumirlo),
+    /// redime el recovery code (consume el single-use vía <c>RecoveryCodeOrchestrator.UseAsync</c>),
+    /// consume el token, emite los tokens con la marca del factor, abre la ventana mfa_verified
+    /// (paridad S3) y, según la política del host, rota el SecurityStamp (revocando las sesiones
+    /// previas y re-emitiendo con el stamp nuevo).
+    ///
+    /// El bloqueo S1 (scope Recovery) se traduce a fallo genérico: el cliente no distingue
+    /// "código erróneo" de "cuenta bloqueada" en el login.
+    /// </remarks>
+    public async Task<(SignInResult Result, TokenResponse? Tokens)> CompleteMfaLoginWithRecoveryCodeAsync(
+        string mfaSessionToken,
+        string recoveryCode,
+        bool rotateSecurityStamp,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(mfaSessionToken);
+        ArgumentException.ThrowIfNullOrWhiteSpace(recoveryCode);
+
+        if (_recoveryCodeOrchestrator is null)
+        {
+            logger.LogWarning("Login por recovery code solicitado sin RecoveryCodeOrchestrator (¿falta AddMfa?)");
+            return (SignInResult.Failed, null);
+        }
+
+        var userId = await mfaSessionStore.ValidateMfaSessionTokenAsync(mfaSessionToken, cancellationToken);
+        if (userId is null)
+        {
+            logger.LogWarning("Token MFA inválido o expirado (login por recovery code)");
+            return (SignInResult.Failed, null);
+        }
+
+        var user = await userStore.FindByIdAsync(userId, cancellationToken);
+        if (user is null)
+        {
+            return (SignInResult.Failed, null);
+        }
+
+        // DIDÁCTICA (F5): el recovery code se consume AQUÍ (single-use atómico vía S2). Si el
+        // scope Recovery está bloqueado, UseAsync devuelve Blocked → fallo genérico de login.
+        var useResult = await _recoveryCodeOrchestrator.UseAsync(userId, recoveryCode, cancellationToken);
+        if (!useResult.Success)
+        {
+            logger.LogWarning("Login por recovery code fallido para el usuario {UserId}", userId);
+            return (SignInResult.Failed, null);
+        }
+
+        await mfaSessionStore.ConsumeMfaSessionTokenAsync(mfaSessionToken, cancellationToken);
+        await userStore.ResetFailedAccessCountAsync(userId, cancellationToken);
+
+        var userWithStamp = user;
+        if (rotateSecurityStamp)
+        {
+            // DIDÁCTICA (política del host): rotar el SecurityStamp invalida TODOS los access
+            // tokens previos (claim "ssv") y revoca todas las sesiones (refresh tokens). Es la
+            // recomendación cuando el recovery code se usa tras pérdida/robo del dispositivo MFA:
+            // una sesión robada no debe sobrevivir a la entrada por código de emergencia.
+            var newSecurityStamp = Guid.NewGuid().ToString();
+            await userStore.UpdateSecurityStampAsync(user.Id, newSecurityStamp, cancellationToken);
+            if (_stampValidator is not null)
+            {
+                await _stampValidator.InvalidateCacheAsync(user.Id, cancellationToken);
+            }
+            await sessionStore.RevokeAllByUserAsync(user.Id, cancellationToken);
+            userWithStamp = user with { SecurityStamp = newSecurityStamp };
+
+            logger.LogInformation("SecurityStamp rotado tras login por recovery code para {UserId}", userId);
+        }
+
+        // DIDÁCTICA (S3): paridad con CompleteMfaLoginAsync — el factor verificado abre la ventana
+        // mfa_verified (para step-up posterior) con el método "recovery".
+        if (_mfaVerifiedSessionStore is not null)
+        {
+            await _mfaVerifiedSessionStore.SetVerifiedAsync(userId, "recovery", cancellationToken);
+        }
+
+        var customClaims = new Dictionary<string, string>(user.Claims ?? []);
+        customClaims["amr"] = "mfa";
+        customClaims["mfa_method"] = "recovery";
+
+        var userWithClaims = userWithStamp with { Claims = customClaims };
+        var tokens = await tokenService.GenerateTokenPairAsync(userWithClaims, cancellationToken);
+
+        var tokenHash = tokenService.HashRefreshToken(tokens.RefreshToken);
+        var refreshEntry = new RefreshTokenEntry
+        {
+            TokenHash = tokenHash,
+            FamilyId = Guid.NewGuid().ToString(),
+            UserId = user.Id,
+            ExpiresAtUtc = DateTime.UtcNow.Add(_options.RefreshTokenLifetime)
+        };
+        await sessionStore.CreateAsync(refreshEntry, cancellationToken);
+
+        if (rotateSecurityStamp)
+        {
+            await eventDispatcher.DispatchAsync(new AuthEvent
+            {
+                EventType = AuthEventType.SecurityStampChanged,
+                UserId = userId,
+                Metadata = new Dictionary<string, string> { ["reason"] = "recovery_code_used" }
+            }, cancellationToken);
+        }
+
+        logger.LogInformation("Login por recovery code exitoso para el usuario {UserId}", userId);
+        await eventDispatcher.DispatchAsync(new AuthEvent
+        {
+            EventType = AuthEventType.LoginSuccess,
+            UserId = userId,
+            Metadata = new Dictionary<string, string> { ["method"] = "password+mfa", ["factor"] = "recovery" }
+        }, cancellationToken);
+
+        return (SignInResult.Success, tokens);
+    }
+
     /// <summary>
     /// Intenta autenticar un usuario mediante un proveedor externo (OAuth).
     /// </summary>

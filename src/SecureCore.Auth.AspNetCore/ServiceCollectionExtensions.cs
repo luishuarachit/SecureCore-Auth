@@ -243,6 +243,7 @@ public class SecureAuthBuilder(IServiceCollection services)
                     opt.AllowUserEnrollment = overrides.AllowUserEnrollment;
                     opt.AllowUserDisable = overrides.AllowUserDisable;
                     opt.EnableRecoveryCodes = overrides.EnableRecoveryCodes;
+                    opt.RecoveryCodeLifetimeDays = overrides.RecoveryCodeLifetimeDays;
                     opt.TotpIssuer = overrides.TotpIssuer;
                     opt.EncryptionKey = overrides.EncryptionKey;
                 }
@@ -259,6 +260,17 @@ public class SecureAuthBuilder(IServiceCollection services)
         Services.TryAddScoped<IMfaCodeStore, DistributedCacheMfaCodeStore>();
         Services.TryAddScoped<IMfaVerifiedSessionStore, DistributedCacheMfaVerifiedSessionStore>();
         Services.AddScoped<IMfaService, MfaOrchestrator>();
+
+        // DIDÁCTICA (F5, A-20): los recovery codes consumen su entrada con la primitiva
+        // single-use atómica (S2) y su default sobre IDistributedCache. Garantizamos el
+        // default aquí por si AddSecureAuth no lo registró.
+        Services.TryAddScoped<ISingleUseTokenStore, DistributedCacheSingleUseTokenStore>();
+
+        // Recovery codes de primera clase (F5): SPI + orquestador. Intencionalmente NO se
+        // responde por EnableRecoveryCodes aquí: la opción es late-bound y el orquestador la
+        // valida en cada llamada. El host que no los quiera simplemente no agrega los endpoints.
+        Services.TryAddScoped<IRecoveryCodeStore, DistributedCacheRecoveryCodeStore>();
+        Services.AddScoped<RecoveryCodeOrchestrator>();
 
         return this;
     }
@@ -624,6 +636,29 @@ public static class ServiceCollectionExtensions
             var options = authOptions.WebAuthnCompleteRateLimiter;
             return new InMemoryRateLimiter(
                 options?.MaxAttempts ?? 10,
+                options?.Window ?? TimeSpan.FromMinutes(1));
+        });
+
+        // DIDÁCTICA (B1, auditoría F5): rate limiters por IP para los endpoints ANÓNIMOS de
+        // recovery codes (/verify y /use). Son keyed e independientes del de login y de los de
+        // WebAuthn: verify es barato pero ejecuta validación JWT por request (amplificación de
+        // CPU); use consume el single-use y el presupuesto S1 por cuenta, por lo que su presupuesto
+        // es más estricto. En multi-instancia, el implementador puede reemplazarlos con versiones
+        // distribuidas (Redis), igual que "webauthn-begin"/"webauthn-complete".
+        services.TryAddKeyedSingleton<IRateLimiter>("recovery-verify", (sp, _) =>
+        {
+            var authOptions = sp.GetRequiredService<IOptions<SecureAuthOptions>>().Value;
+            var options = authOptions.RecoveryVerifyRateLimiter;
+            return new InMemoryRateLimiter(
+                options?.MaxAttempts ?? 10,
+                options?.Window ?? TimeSpan.FromMinutes(1));
+        });
+        services.TryAddKeyedSingleton<IRateLimiter>("recovery-use", (sp, _) =>
+        {
+            var authOptions = sp.GetRequiredService<IOptions<SecureAuthOptions>>().Value;
+            var options = authOptions.RecoveryUseRateLimiter;
+            return new InMemoryRateLimiter(
+                options?.MaxAttempts ?? 5,
                 options?.Window ?? TimeSpan.FromMinutes(1));
         });
 

@@ -443,6 +443,215 @@ public static class SecureAuthEndpoints
     }
 
     /// <summary>
+    /// Mapea los endpoints de recovery codes (F5, A-18/A-20) en la ruta especificada.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: es un mapper dedicado (no vive dentro de <c>MapSecureAuthEndpoints</c>) por dos
+    /// razones. Primero, sigue el precedente de <c>MapSecureAuthWebAuthnEndpoints</c> (S4): cada
+    /// subdominio opt-in de MFA agrupa sus rutas en su propio método para que el host controle
+    /// exactamente qué expone. Segundo, los flujos <c>verify</c> y <c>use</c> son ANÓNIMOS pero
+    /// tutelados: la cuenta se resuelve desde el <c>mfaSessionToken</c> del login en curso
+    /// (mismo patrón que <c>IdentityOrchestrator.CompleteMfaLoginAsync</c>), nunca desde el cuerpo.
+    ///
+    /// El flujo de negocio sigue siendo del HOST: tras un <c>use</c> exitoso completará el login
+    /// con ese mismo <c>mfaSessionToken</c> y, según su política, rotará el SecurityStamp (el
+    /// evento <c>RecoveryCodeRedeemed</c> se emite precisamente para eso).
+    ///
+    /// Si <c>AddMfa()</c> no se usó (no hay <c>RecoveryCodeOrchestrator</c> registrado), todas
+    /// las rutas responden 503 <c>recovery_codes_not_configured</c>.
+    /// </remarks>
+    /// <param name="endpoints">El builder de endpoints de la aplicación.</param>
+    /// <param name="prefix">Prefijo de ruta (ej: "/auth/recovery-codes").</param>
+    /// <returns>El grupo de endpoints creado.</returns>
+    public static RouteGroupBuilder MapSecureAuthRecoveryCodesEndpoints(
+        this IEndpointRouteBuilder endpoints,
+        string prefix = "/auth/recovery-codes")
+    {
+        var group = endpoints.MapGroup(prefix);
+
+        // ─────────────────────────────────────────────────────────
+        //  POST {prefix}/generate (F5, A-20 — opt-in con MFA)
+        // ─────────────────────────────────────────────────────────
+        // DIDÁCTICA: genera un lote nuevo de recovery codes y los devuelve en texto plano UNA
+        // SOLA VEZ (el store solo persiste hashes SHA-256). Al regenerar, el lote anterior
+        // queda invalidado por completo. Es un endpoint AUTENTICADO: quien genera códigos de
+        // emergencia debe estar dentro de la cuenta. Si el orquestador no está registrado
+        // (AddMfa) responde 503.
+        group.MapPost("/generate", async (
+            HttpContext httpContext,
+            IServiceProvider serviceProvider,
+            CancellationToken ct) =>
+        {
+            var orchestrator = serviceProvider.GetService<RecoveryCodeOrchestrator>();
+            if (orchestrator is null)
+            {
+                return Results.Json(
+                    new { error = "recovery_codes_not_configured", message = "Los códigos de recuperación no están configurados." },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            var userId = httpContext.User.FindFirst("sub")?.Value
+                         ?? httpContext.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+            if (userId is null)
+            {
+                return Results.Unauthorized();
+            }
+
+            var result = await orchestrator.GenerateAsync(userId, ct);
+            if (result.Success && result.Codes is not null)
+            {
+                return Results.Ok(new
+                {
+                    message = "Guarda estos códigos: solo se muestran una vez.",
+                    codes = result.Codes
+                });
+            }
+
+            return Results.Json(
+                new { error = "recovery_codes_disabled", message = result.ErrorMessage ?? "No se pudieron generar los códigos." },
+                statusCode: StatusCodes.Status400BadRequest);
+        })
+        .WithName("GenerateRecoveryCodes")
+        .WithDescription("Regenera los recovery codes de la cuenta autenticada (se muestran una sola vez).")
+        .RequireAuthorization();
+
+        // ─────────────────────────────────────────────────────────
+        //  POST {prefix}/verify (F5, A-20 — opt-in con MFA)
+        // ─────────────────────────────────────────────────────────
+        // DIDÁCTICA: comprueba si un código es redimible SIN consumirlo. Es ANÓNIMO pero no
+        // acepta un userId del cliente: la cuenta se resuelve desde el mfaSessionToken del
+        // paso de login (mismo patrón que IdentityOrchestrator.CompleteMfaLoginAsync). Así un
+        // atacante no puede probar códigos contra cuentas arbitrarias. NO distingue en la
+        // respuesta "código inexistente" vs "ya consumido" vs "bloqueado" (anti-enumeración).
+        group.MapPost("/verify", async (
+            RecoveryCodeRedemptionRequest request,
+            HttpContext httpContext,
+            IServiceProvider serviceProvider,
+            CancellationToken ct) =>
+        {
+            var orchestrator = serviceProvider.GetService<RecoveryCodeOrchestrator>();
+            var mfaSessionStore = serviceProvider.GetService<IMfaSessionStore>();
+            if (orchestrator is null || mfaSessionStore is null)
+            {
+                return Results.Json(
+                    new { error = "recovery_codes_not_configured", message = "Los códigos de recuperación no están configurados." },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            // DIDÁCTICA (B1, auditoría): verify es anónimo y cada intento ejecuta validación JWT
+            // del mfaSessionToken (RS256/ES256) + lecturas al caché. Se limita por IP con el
+            // presupuesto keyed "recovery-verify" ANTES de validar el token (el host sin
+            // AddSecureAuth no registra el limiter → degradación elegante, sin 429).
+            var ipAddress = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            var verifyLimiter = serviceProvider.GetKeyedService<IRateLimiter>("recovery-verify");
+            if (verifyLimiter is not null && !verifyLimiter.IsAllowed(ipAddress))
+            {
+                return Results.Json(
+                    new { error = "too_many_requests", message = "Demasiados intentos. Intenta más tarde." },
+                    statusCode: StatusCodes.Status429TooManyRequests);
+            }
+
+            // DIDÁCTICA (no-enumeración): token inválido/código inválido se responden igual.
+            var userId = await mfaSessionStore.ValidateMfaSessionTokenAsync(request.MfaSessionToken, ct);
+            if (userId is null)
+            {
+                return Results.Json(new { valid = false });
+            }
+
+            var result = await orchestrator.VerifyAsync(userId, request.Code, ct);
+
+            // DIDÁCTICA (B1): un verify exitoso resetea el presupuesto por IP (no penalizar al
+            // usuario legítimo que completa el flujo, mismo patrón que /auth/login).
+            if (result.IsValid)
+            {
+                verifyLimiter?.Reset(ipAddress);
+            }
+
+            return Results.Ok(new { valid = result.IsValid });
+        })
+        .AddEndpointFilter(EnforceAnonymousRequestSizeLimit)
+        .WithName("VerifyRecoveryCode")
+        .WithDescription("Comprueba si un recovery code es redimible sin consumirlo (anti-enumeración).")
+        .AllowAnonymous();
+
+        // ─────────────────────────────────────────────────────────
+        //  POST {prefix}/use (F5, A-20 — opt-in con MFA)
+        // ─────────────────────────────────────────────────────────
+        // DIDÁCTICA: consume el código de forma atómica (single-use) y emite el evento
+        // RecoveryCodeRedeemed para que el HOST decida rotar el SecurityStamp o revocar
+        // sesiones (el flujo de completar el login es patrón de negocio del consumidor).
+        // El mfaSessionToken se valida SIN consumirse: el host lo usará en su flujo
+        // CompleteMfaLoginAsync. Respuestas: 200 redimido, 429 bloqueado (sin detalles),
+        // 400 código inválido (genérico).
+        group.MapPost("/use", async (
+            RecoveryCodeRedemptionRequest request,
+            HttpContext httpContext,
+            IServiceProvider serviceProvider,
+            CancellationToken ct) =>
+        {
+            var orchestrator = serviceProvider.GetService<RecoveryCodeOrchestrator>();
+            var mfaSessionStore = serviceProvider.GetService<IMfaSessionStore>();
+            if (orchestrator is null || mfaSessionStore is null)
+            {
+                return Results.Json(
+                    new { error = "recovery_codes_not_configured", message = "Los códigos de recuperación no están configurados." },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            // DIDÁCTICA (B1, auditoría): use consume el single-use y el presupuesto S1 por cuenta;
+            // es el endpoint más sensible del flujo. Presupuesto por IP keyed "recovery-use" (5/min
+            // por defecto) ANTES de validar el token o tocar el store. Sin AddSecureAuth no hay
+            // limiter registrado → degradación elegante.
+            var ipAddress = httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+            var useLimiter = serviceProvider.GetKeyedService<IRateLimiter>("recovery-use");
+            if (useLimiter is not null && !useLimiter.IsAllowed(ipAddress))
+            {
+                return Results.Json(
+                    new { error = "too_many_requests", message = "Demasiados intentos. Intenta más tarde." },
+                    statusCode: StatusCodes.Status429TooManyRequests);
+            }
+
+            var userId = await mfaSessionStore.ValidateMfaSessionTokenAsync(request.MfaSessionToken, ct);
+            if (userId is null)
+            {
+                return Results.Json(
+                    new { error = "invalid_code", message = "Código inválido." },
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            var result = await orchestrator.UseAsync(userId, request.Code, ct);
+            if (result.Success)
+            {
+                // DIDÁCTICA (B1): reset del presupuesto por IP en éxito (no penalizar al legítimo).
+                useLimiter?.Reset(ipAddress);
+
+                return Results.Ok(new
+                {
+                    redeemed = true,
+                    message = "Código redimido. Rota tu SecurityStamp si sospechas que tus códigos fueron comprometidos."
+                });
+            }
+
+            if (result.LockedOut)
+            {
+                return Results.Json(
+                    new { error = "too_many_attempts", message = result.ErrorMessage },
+                    statusCode: StatusCodes.Status429TooManyRequests);
+            }
+
+            return Results.Json(
+                new { error = "invalid_code", message = result.ErrorMessage ?? "Código inválido." },
+                statusCode: StatusCodes.Status400BadRequest);
+        })
+        .AddEndpointFilter(EnforceAnonymousRequestSizeLimit)
+        .WithName("UseRecoveryCode")
+        .WithDescription("Consume un recovery code (single-use atómico) y emite RecoveryCodeRedeemed.")
+        .AllowAnonymous();
+
+        return group;
+    }
+
+    /// <summary>
     /// Traduce un ChangePasswordResult a una respuesta HTTP con tokens (éxito) o error genérico.
     /// </summary>
     /// <remarks>
@@ -602,3 +811,19 @@ public record ChangePasswordRequest(
     [property: MinLength(8, ErrorMessage = "La contraseña debe tener al menos 8 caracteres.")]
     [property: MaxLength(1024, ErrorMessage = "La contraseña no puede superar 1024 caracteres.")]
     string NewPassword);
+
+/// <summary>
+/// Solicitud de verificación/redención de un recovery code (F5, A-20).
+/// </summary>
+/// <remarks>
+/// DIDÁCTICA: la cuenta se resuelve desde el <c>mfaSessionToken</c> del paso de login (nunca
+/// desde un userId del cliente) para impedir probar códigos contra cuentas arbitrarias. El
+/// token se valida SIN consumirse: el host lo reutiliza en su flujo CompleteMfaLoginAsync.
+/// </remarks>
+public record RecoveryCodeRedemptionRequest(
+    [property: Required(ErrorMessage = "El token de sesión MFA es requerido.")]
+    string MfaSessionToken,
+
+    [property: Required(ErrorMessage = "El código de recuperación es requerido.")]
+    [property: MaxLength(128, ErrorMessage = "El código no puede superar 128 caracteres.")]
+    string Code);

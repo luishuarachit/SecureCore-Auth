@@ -80,6 +80,18 @@ public class MfaOptions
     public int RecoveryCodeCount { get; set; } = 10;
 
     /// <summary>
+    /// Tiempo de vida de un lote de recovery codes (en días).
+    /// Por defecto: 90 días.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA (F5): la expiración es deliberada: un recovery code es una credencial de
+    /// emergencia de alta sensibilidad y debe regenerarse periódicamente. Al expirar, el
+    /// código deja de ser redimible y el usuario debe generar un lote nuevo.
+    /// </remarks>
+    [Range(1, 365)]
+    public int RecoveryCodeLifetimeDays { get; set; } = 90;
+
+    /// <summary>
     /// Emisor shown en el QR code TOTP (app authenticator).
     /// Por defecto: "AuthCore".
     /// </summary>

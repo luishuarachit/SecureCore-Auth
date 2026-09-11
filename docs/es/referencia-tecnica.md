@@ -253,6 +253,28 @@ la implementación por defecto es `InMemoryAccountProtectionService`.
   (adaptador sobre `IEmailService`). Registre su propia implementación ANTES de `AddVerifyAction()`
   para sobrescribirla (TryAdd).
 
+### 3.8. IRecoveryCodeStore (v3.2.0, F5)
+
+SPI de persistencia de los recovery codes de primera clase (A-18/A-20). El orquestador
+(`RecoveryCodeOrchestrator`) NUNCA ve el código en claro: solo recibe/entrega hashes SHA-256
+(hex minúsculas) y delega el **single-use atómico** en `ISingleUseTokenStore` (S2).
+
+- `ValueTask CreateAsync(string userId, string codeHash, TimeSpan ttl, CancellationToken ct)` — persiste un código pendiente de redención con su TTL (`MfaOptions.RecoveryCodeLifetimeDays`).
+- `ValueTask<RecoveryCodeStatus> GetStatusAsync(string userId, string codeHash, CancellationToken ct)` — **peek NO consumidor**: distingue `Valid` / `AlreadyUsed` / `Invalid` sin gastar el código (ver DIDÁCTICA en §4.10 sobre por qué el SPI tiene 4 métodos).
+- `ValueTask<bool> RedeemAsync(string userId, string codeHash, CancellationToken ct)` — consume de forma **atómica** (delega en `ISingleUseTokenStore.GetAndRemoveAsync`); devuelve `true` una única vez. La redención se serializa con un `IOperationLock` por código (A2, auditoría): cierra la ventana TOCTOU del S2 por defecto (GET + REMOVE no atómico) en single-instance. Para multi-instancia sigue siendo necesaria una implementación S2 atómicamente consumidora (Redis GETDEL/Lua).
+- `Task InvalidatePendingAsync(string userId, CancellationToken ct)` — al regenerar un lote, invalida los códigos pendientes del usuario (los ya consumidos no tienen token S2 que invalidar).
+
+**Default**: `DistributedCacheRecoveryCodeStore` sobre `IDistributedCache` con dos claves:
+- Token S2 por código: `"recovery:code:{userId}|{hash}"` (valor = hash; delimitador `|` — el hash es siempre un sufijo de 64 hex, clave inequívoca aunque el userId contenga el separador) — la **garantía de seguridad** (single-use atómico).
+- Índice JSON por usuario: `"recovery:index:{userId}"` (lista de `{hash, used}`) — solo para distinguir `AlreadyUsed` vs `Invalid` en `GetStatusAsync`.
+
+**Orden de escritura**: el índice se escribe PRIMERO y el token S2 DESPUÉS. Si el proceso muere
+entre ambas escrituras durante una regeneración, el índice apunta a códigos cuyo token no existe
+→ **no hay códigos huérfanos redimibles**. `RedeemAsync` decide SOLO por el token S2 (single-use
+garantizado); el flag `used` del índice es best-effort (auditoría/estado). Al registrar `AddMfa()`,
+el default se registra con `TryAddScoped`: implementa tu propia versión distribuida
+(Redis GETDEL/Lua) ANTES de `AddSecureAuth()` y el orquestador la usará automáticamente.
+
 ---
 
 ## 4. Servicios Core (API)
@@ -263,6 +285,7 @@ Coordina el flujo de autenticación. No contiene lógica criptográfica pero orq
 - **`SignInWithPasswordAsync(email, password)`**: Ejecuta búsqueda, validación de bloqueo, hashing de tiempo constante y generación de tokens.
   - Implementa `VerifyDummyPassword` para mitigar ataques de tiempo si el usuario no existe.
 - **`SignInExternalAsync(provider, providerKey)`**: Procesa el login para usuarios autenticados vía OAuth (Google, GitHub, etc.). Vincula la identidad externa con una sesión local.
+- **`CompleteMfaLoginWithRecoveryCodeAsync(mfaSessionToken, recoveryCode, rotateSecurityStamp, ct)`** (v3.2.0, A1 auditoría F5): completa el login con un recovery code ya redimido. A diferencia de `CompleteMfaLoginAsync` (que exige un `mfaCode` TOTP/email), este flujo redime el recovery code (single-use vía `RecoveryCodeOrchestrator.UseAsync`), consume el token de sesión, emite tokens con `amr=mfa`/`mfa_method=recovery` y abre la ventana `mfa_verified` (paridad S3). El flag `rotateSecurityStamp` (política del host) rota el SecurityStamp, invalida su caché y revoca **todas** las sesiones previas (recomendado tras pérdida/robo del dispositivo MFA); con `false`, la sesión y el stamp actuales se conservan. El bloqueo S1 (scope `Recovery`) se traduce a fallo genérico de login (sin revelar la causa). Requiere `AddMfa()` (sin `RecoveryCodeOrchestrator` registrado devuelve `Failed`).
 
 ### 4.2. ITokenService (JwtTokenService)
 Responsable de la generación y validación de tokens.
@@ -464,6 +487,36 @@ MFA es exitoso — un fallo de MFA nunca la abre. La ventana es **aditiva**: sin
 > `/create-password` y `/change-password` devuelven el **nuevo par de tokens** en el body
 > (`success.tokens`) para que el cliente adopte la nueva familia.
 
+### 4.10. Recovery codes de primera clase (F5, v3.2.0)
+
+Los recovery codes de emergencia como **ciudadanos de primera clase** (A-18/A-20), no como un
+string plano hasheado y olvidado (legacy `MfaOrchestrator.SetRecoveryCodesAsync`).
+
+**`RecoveryCodeOrchestrator`** — `AddMfa()` lo registra siempre; `EnableRecoveryCodes` es
+**late-bound** y se valida en cada llamada (un host que no lo quiera simplemente no mapea los
+endpoints de §5.3).
+
+| Método | Comportamiento |
+| :--- | :--- |
+| `GenerateAsync(userId)` | Valida `EnableRecoveryCodes`; guard defensivo `RecoveryCodeCount >= 1` (B5, auditoría: un count inválido NO invalida el lote anterior); genera `RecoveryCodeCount` códigos CSPRNG, hashea cada uno (SHA-256 hex minúsculas; rechazo barato `RecoveryCodeMaxLength = 128` antes de hashear), persiste SOLO hashes con TTL `MfaOptions.RecoveryCodeLifetimeDays` (default 90, rango [1,365]), invalida el lote anterior (`InvalidatePendingAsync`) y emite el evento `RecoveryCodesGenerated`. Devuelve los códigos en claro **una sola vez**. La regeneración se **serializa por usuario** con `IOperationLock` (B2, auditoría): dos `GenerateAsync` concurrentes (doble clic) no pueden intercalar el índice y dejar un lote de tokens S2 huérfanos redimibles. |
+| `VerifyAsync(userId, code)` | Hash + `GetStatusAsync` (peek no consumidor). `IsValid` solo si el código es redimible. Con S1, cada fallo consume el scope `Recovery`; si el scope está bloqueado responde no válido (genérico, sin revelar el bloqueo). Éxito → `RecordSuccessAsync`. Un fallo que NO dispara lockout emite `RecoveryCodeVerificationFailed` (B3, auditoría). |
+| `UseAsync(userId, code)` | Hash + `RedeemAsync` (single-use vía S2, serializado con `IOperationLock` por código — A2, auditoría). Éxito → `RecoveryCodeRedeemed` + `RecordSuccessAsync` (limpia el scope `Recovery`). Fallo → `RecordFailureAsync`; el fallo que dispara el lockout responde `LockedOut` (→ 429 en el endpoint) y emite `AccountLockedOut` con metadata `scope=recovery`, `reason=lock_triggered`; el fallo que NO dispara lockout emite `RecoveryCodeRedemptionFailed` (B3, auditoría). |
+
+**Eventos nuevos**: `RecoveryCodesGenerated`, `RecoveryCodeRedeemed`, `RecoveryCodeVerificationFailed`, `RecoveryCodeRedemptionFailed` (ver §6.1).
+
+> **DIDÁCTICA — ¿Por qué el SPI tiene 4 métodos y el plan F5 pedía 3?** El plan (Tarea 5.1)
+> definía `Create`/`Redeem`/`Invalidate`. Sin `GetStatusAsync`, `VerifyAsync` no puede distinguir
+> "es redimible" de "ya consumido" SIN CONSUMIR el código (y `RedeemAsync` debe seguir siendo el
+> único camino de consumo). El peek no consumidor es la pieza que hace viable la verificación
+> pre-login sin gastar el código de emergencia.
+
+> **DIDÁCTICA — El flujo de negocio es del HOST (A1, auditoría F5)**: el endpoint `use` consume
+> el código y emite el evento, pero completar el login es **`IdentityOrchestrator
+> .CompleteMfaLoginWithRecoveryCodeAsync`** (§4.1) — el host NO debe reimplementar la emisión de
+> tokens a mano: `CompleteMfaLoginAsync` exige un código TOTP/email y no puede verificar un
+> recovery code. El `mfaSessionToken` se valida en `use`/`verify` SIN consumirse para que el host
+> lo reutilice después en ese flujo.
+
 ---
 
 ## 5. Middleware y Endpoints de Integración
@@ -500,6 +553,19 @@ claim `sub`; respuestas con mensajes genéricos; 503 si el orquestador no está 
 - `POST /create-password`: `{ newPassword }` — crea contraseña (requiere ventana de step-up abierta; sin `otp` en el cuerpo).
 - `POST /change-password`: `{ currentPassword, newPassword }` — cambia contraseña (sin step-up).
 
+**F5 (v3.2.0) — recovery codes opt-in** (mapper dedicado `MapSecureAuthRecoveryCodesEndpoints(prefix = "/auth/recovery-codes")`;
+requiere `AddMfa()`; respuestas genéricas y anti-enumeración; 503 si el orquestador no está registrado):
+
+- `POST /generate`: autenticado — regenera el lote y devuelve los códigos en claro **una sola vez** (400 `recovery_codes_disabled` si `EnableRecoveryCodes=false`).
+- `POST /verify`: anónimo, `{ mfaSessionToken, code }` — comprueba si el código es redimible **sin consumirlo**; responde `{ valid }` (anti-enumeración: token/código inválidos responden igual). Limitado por IP con el presupuesto keyed `"recovery-verify"` (`SecureAuthOptions.RecoveryVerifyRateLimiter`, default 10/min; B1, auditoría).
+- `POST /use`: anónimo, `{ mfaSessionToken, code }` — consume el código (single-use atómico); 200 `{ redeemed: true }`, 429 `too_many_attempts` si el scope `Recovery` está bloqueado, 400 `invalid_code` genérico. Limitado por IP con el presupuesto keyed `"recovery-use"` (`SecureAuthOptions.RecoveryUseRateLimiter`, default 5/min; B1, auditoría). El éxito resetea el presupuesto por IP (no penalizar al legítimo).
+
+> **DIDÁCTICA — por qué mapper dedicado y no dentro de `MapSecureAuthEndpoints`**: sigue el
+> precedente de `MapSecureAuthWebAuthnEndpoints` (S4): cada subdominio opt-in de MFA agrupa sus
+> rutas en su propio método. Además `verify`/`use` son anónimos pero tutelados: la cuenta se
+> resuelve desde el `mfaSessionToken` (nunca desde un `userId` del cuerpo), impidiendo probar
+> códigos contra cuentas arbitrarias.
+
 ---
 
 ## 6. Seguridad y Observabilidad
@@ -518,6 +584,8 @@ El sistema despacha eventos de dominio asíncronos mediante `IAuthEventDispatche
 - `PasswordResetRequested`: Solicitud de reset iniciada por email.
 - `PasswordResetCompleted`: Cambio de contraseña exitoso mediante token.
 - `MfaEnrolled` / `MfaDisabled` / `MfaVerificationSuccess` / `MfaVerificationFailed`: Eventos del flujo MFA.
+- `RecoveryCodesGenerated` / `RecoveryCodeRedeemed` (v3.2.0, F5): lote de recovery codes generado / código redimido (consumido) con éxito.
+- `RecoveryCodeVerificationFailed` / `RecoveryCodeRedemptionFailed` (v3.2.0, F5): verificación/redención de recovery code fallida sin disparar lockout (B3, auditoría; paridad con `MfaVerificationFailed`).
 - `AnonymousLoginFailed` (v3.1.5): Intento de login con email/usuario inexistente. `UserId = null`, sin datos sensibles en Metadata (anti-enumeración).
 - `RateLimitExceeded` (v3.1.5): Rate limit de IP excedido en `/auth/login`. `UserId = null`.
 - `PasskeyVerificationFailed`, `SecurityStampChanged`, `PasswordChangeFailed` (v3.1.5): Reservados para uso futuro.
