@@ -933,6 +933,63 @@ POST /auth/reset-password
 
 ---
 
+### Caso 10: Paso de verificación (step-up) y creación/cambio de contraseña (v3.2.0, S3)
+
+**Escenario**: quieres proteger acciones sensibles (cambiar contraseña, borrar datos) con una
+segunda verificación **sin forzar el login completo**, y dar a los usuarios la opción de crear o
+cambiar su contraseña.
+
+**Configuración** (los defaults son seguros; no necesitas más):
+
+```csharp
+builder.Services.AddSecureAuth(options => { ... });
+builder.Services.AddScoped<IEmailService, MiEmailService>();   // para el envío del OTP
+builder.Services.AddVerifyAction();                            // step-up + ventana mfa_verified
+builder.Services.AddChangePassword();                          // crear/cambiar contraseña
+```
+
+**Paso 1 — Solicitar el código y verificar (step-up)**. La acción sensible llama primero a la
+verificación; su éxito abre una **ventana acotada** (8 h por defecto) para que el host pueda
+consultar `IMfaVerifiedSessionStore.IsVerifiedAsync(userId)` y proceder sin repetir el código.
+Los endpoints son autenticados (el usuario se identifica por el claim `sub` del token; no se
+envía cuerpo en el envío).
+
+```http
+POST /auth/verify-action/send
+POST /auth/verify-action/verify { "code": "483920" }
+```
+
+**Paso 2 — Crear contraseña (cuentas sin password, p. ej. login social o passkey)**. Exige la
+ventana de step-up **abierta**: el código ya se consumió en el paso 1 (single-use), por lo que
+`create-password` solo comprueba `IsVerifiedAsync(userId)` y NO espera un `otp` en el cuerpo.
+
+```http
+POST /auth/create-password { "newPassword": "ContraseñaNueva" }
+```
+
+**Paso 2' — Cambiar contraseña (con contraseña actual)**. Sin step-up: valida la contraseña actual.
+
+```http
+POST /auth/change-password { "currentPassword": "Actual", "newPassword": "Nueva" }
+```
+
+Ambos devuelven el **nuevo par de tokens** (`accessToken`/`refreshToken`): al revocar todas las
+sesiones previas y rotar el SecurityStamp, la respuesta incluye la familia actualizada para que el
+cliente continúe sin volver a iniciar sesión.
+
+**Protecciones** (S1 + S2/S3): el OTP es de un solo uso, expira en 5 min y solo se guarda su hash.
+Cada envío y cada fallo cuentan contra el scope `VerifyAction` (anti email-flood y anti fuerza
+bruta), y un throttle duro por usuario (3 envíos por ventana, `MaxSendsPerWindow`) aplica SIEMPRE,
+incluso sin S1. El cambio de contraseña además se protege contra fuerza bruta de la contraseña
+actual con el scope `PasswordChange` (S1). Las respuestas de error son siempre genéricas.
+
+> **DIDÁCTICA — ¿Cuándo es necesario el step-up?**: una ventana `mfa_verified` acotada (8 h) limita
+> el riesgo: un atacante que robe una sesión ya autenticada no podrá repetir la verificación
+> indefinidamente. Ajusta `SecureAuthOptions.MfaVerifiedTtl` según el riesgo de tu operación
+> (0 = exigir verify-action en cada operación sensible).
+
+---
+
 ## Funcionalidades Avanzadas
 
 ### Passkeys / WebAuthn

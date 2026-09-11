@@ -210,6 +210,62 @@ public class SessionOrchestratorTests
             Arg.Any<CancellationToken>());
     }
 
+    [Fact]
+    public async Task RevokeAllSessionsAsync_WithVerifiedStore_ClearsMfaVerifiedWindow()
+    {
+        // Arrange (H2, auditoría): la revocación global también cae la ventana mfa_verified.
+        var mfaVerified = Substitute.For<IMfaVerifiedSessionStore>();
+        var orchestrator = CreateOrchestratorWithWindow(mfaVerified);
+
+        // Act
+        await orchestrator.RevokeAllSessionsAsync("u1");
+
+        // Assert: una sesión nueva (sin MFA) dentro de MfaVerifiedTtl no hereda el step-up.
+        await mfaVerified.Received(1).ClearAsync("u1", Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task LogoutAsync_WithVerifiedStore_ClearsMfaVerifiedWindow()
+    {
+        // Arrange (H2, auditoría): el cierre de sesión invalida la ventana compartida.
+        var mfaVerified = Substitute.For<IMfaVerifiedSessionStore>();
+        var orchestrator = CreateOrchestratorWithWindow(mfaVerified);
+        _tokenService.HashRefreshToken("token").Returns("hash");
+        _sessionStore.FindByTokenHashAsync("hash")
+            .Returns(ValueTask.FromResult<RefreshTokenEntry?>(new RefreshTokenEntry
+            {
+                TokenHash = "hash",
+                FamilyId = "f1",
+                UserId = "u1",
+                ExpiresAtUtc = DateTime.UtcNow.AddDays(7)
+            }));
+
+        // Act
+        await orchestrator.LogoutAsync("token");
+
+        // Assert
+        await mfaVerified.Received(1).ClearAsync("u1", Arg.Any<CancellationToken>());
+    }
+
+    private SessionOrchestrator CreateOrchestratorWithWindow(IMfaVerifiedSessionStore mfaVerified)
+    {
+        return new SessionOrchestrator(
+            _sessionStore,
+            _userStore,
+            _tokenService,
+            _stampValidator,
+            _eventDispatcher,
+            Options.Create(new SecureAuthOptions
+            {
+                GracePeriodSeconds = 30,
+                RefreshTokenLifetime = TimeSpan.FromDays(7),
+                AccessTokenLifetime = TimeSpan.FromMinutes(15)
+            }),
+            _operationLock,
+            NullLogger<SessionOrchestrator>.Instance,
+            mfaVerified);
+    }
+
     private sealed class MockLock : IDisposable
     {
         public void Dispose() { }

@@ -81,6 +81,12 @@ public class SecureAuthBuilder(IServiceCollection services)
         // regístralo ANTES de llamar a AddPasswordAuthentication().
         Services.TryAddScoped<IMfaCodeStore, DistributedCacheMfaCodeStore>();
 
+        // DIDÁCTICA (S3): ventana "mfa_verified" (post-verificación, TTL MfaVerifiedTtl).
+        // Registrado aquí para que IdentityOrchestrator.CompleteMfaLoginAsync pueda marcarla
+        // al completar el login MFA. Si el consumidor implementa su propio store, lo registra
+        // ANTES (TryAdd lo respeta).
+        Services.TryAddScoped<IMfaVerifiedSessionStore, DistributedCacheMfaVerifiedSessionStore>();
+
         Services.AddScoped<IMfaService, MfaOrchestrator>();
 
         Services.AddScoped<IdentityOrchestrator>();
@@ -184,6 +190,7 @@ public class SecureAuthBuilder(IServiceCollection services)
         Services.AddScoped<IEmailMfaService, EmailMfaService>();
         AddEmailServiceDefault(Services);
         Services.TryAddScoped<IMfaCodeStore, DistributedCacheMfaCodeStore>();
+        Services.TryAddScoped<IMfaVerifiedSessionStore, DistributedCacheMfaVerifiedSessionStore>();
         Services.AddScoped<IMfaService, MfaOrchestrator>();
 
         return this;
@@ -282,6 +289,75 @@ public class SecureAuthBuilder(IServiceCollection services)
     }
 
     /// <summary>
+    /// Habilita el step-up genérico (S3, verify-action): OTP por email para mutaciones sensibles.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: registra el orquestador <c>VerifyActionOrchestrator</c>, el store de OTP
+    /// (single-use atómico vía S2), la ventana mfa_verified compartida y el adaptador de envío
+    /// por defecto sobre IEmailService. Opt-in: sin este registro, los endpoints
+    /// /verify-action/* responden 503.
+    ///
+    /// ENVÍO: el adaptador por defecto delega en IEmailService; si no registró una
+    /// implementación real, el envío falla con mensaje genérico (nunca 500 con detalles).
+    /// Sobrescritura: registre <c>IEmailOtpSender</c> (o <c>IEmailService</c>) ANTES de esta
+    /// llamada (TryAdd los respeta). También puede registrar su <c>IEmailOtpStore</c> propio
+    /// con un backend real si no quiere el default sobre IDistributedCache.
+    /// </remarks>
+    /// <param name="configure">Acción opcional para sobrescribir las opciones por defecto.</param>
+    /// <returns>El builder para encadenamiento.</returns>
+    public SecureAuthBuilder AddVerifyAction(Action<VerifyActionOptions>? configure = null)
+    {
+        Services.AddOptions<VerifyActionOptions>()
+            .BindConfiguration(VerifyActionOptions.SectionName)
+            .PostConfigure(opt =>
+            {
+                if (configure is not null)
+                {
+                    var overrides = new VerifyActionOptions();
+                    configure(overrides);
+                    opt.TtlMinutes = overrides.TtlMinutes;
+                    opt.CodeLength = overrides.CodeLength;
+                }
+            })
+            .ValidateDataAnnotations()
+            .ValidateOnStart();
+
+        // DIDÁCTICA (S3): el store de OTP consume su entrada con la primitiva single-use
+        // atómica (S2). Garantizamos el default aquí por si AddSecureAuth no lo registró.
+        Services.TryAddScoped<ISingleUseTokenStore, DistributedCacheSingleUseTokenStore>();
+        Services.TryAddScoped<IEmailOtpStore, DistributedCacheEmailOtpStore>();
+        Services.TryAddScoped<IEmailOtpSender, EmailServiceEmailOtpSender>();
+        Services.TryAddScoped<IMfaVerifiedSessionStore, DistributedCacheMfaVerifiedSessionStore>();
+        Services.AddScoped<VerifyActionOrchestrator>();
+
+        return this;
+    }
+
+    /// <summary>
+    /// Habilita el flujo de creación/cambio de contraseña (S3, A-22).
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: registra <c>ChangePasswordOrchestrator</c>. Opt-in: sin este registro los
+    /// endpoints /create-password y /change-password responden 503 (patrón de forgot/reset).
+    ///
+    /// El orquestador exige ITokenService, ISessionStore y SecurityStampValidator: asegúrese de
+    /// haber llamado a AddVerifyAction (o registrado sus propios stores) ANTES de cambiar
+    /// contraseñas. Para el flujo de CREACIÓN necesita además la ventana mfa_verified
+    /// (IMfaVerifiedSessionStore) que abre el paso previo verify-action (M1, auditoría): el OTP
+    /// se consume en VerifyActionAsync; crear la contraseña solo comprueba que la ventana siga
+    /// abierta (fail-closed si AddVerifyAction no se registró y la ventana nunca se abre).
+    /// </remarks>
+    /// <returns>El builder para encadenamiento.</returns>
+    public SecureAuthBuilder AddChangePassword()
+    {
+        // DIDÁCTICA (M1): el flujo de creación depende de la ventana mfa_verified. Garantizamos
+        // el default por si AddSecureAuth/AddVerifyAction no lo registró (TryAdd respeta el host).
+        Services.TryAddScoped<IMfaVerifiedSessionStore, DistributedCacheMfaVerifiedSessionStore>();
+        Services.AddScoped<ChangePasswordOrchestrator>();
+        return this;
+    }
+
+    /// <summary>
     /// Registra una implementación por defecto de IEmailService si el consumidor
     /// no proporcionó la suya. NullEmailService lanza al intentar enviar.
     /// </summary>
@@ -302,14 +378,9 @@ public class SecureAuthBuilder(IServiceCollection services)
 /// default LANZA InvalidOperationException al intentar enviar, forzando al
 /// implementador a registrar su propio IEmailService ANTES de AddMfa().
 /// </remarks>
-internal sealed class NullEmailService : IEmailService
+internal sealed class NullEmailService(ILogger<NullEmailService> logger) : IEmailService
 {
-    private readonly ILogger<NullEmailService> _logger;
-
-    public NullEmailService(ILogger<NullEmailService> logger)
-    {
-        _logger = logger;
-    }
+    private readonly ILogger<NullEmailService> _logger = logger;
 
     public Task SendAsync(
         string to,

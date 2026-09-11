@@ -34,7 +34,8 @@ public sealed class SessionOrchestrator(
     IAuthEventDispatcher eventDispatcher,
     IOptions<SecureAuthOptions> options,
     IOperationLock operationLock,
-    ILogger<SessionOrchestrator> logger)
+    ILogger<SessionOrchestrator> logger,
+    IMfaVerifiedSessionStore? mfaVerifiedSessionStore = null)
 {
     private readonly SecureAuthOptions _options = options.Value;
     private readonly TimeSpan _lockTimeout = TimeSpan.FromSeconds(
@@ -258,6 +259,14 @@ public sealed class SessionOrchestrator(
         // Paso 3: Revocar todos los Refresh Tokens
         await sessionStore.RevokeAllByUserAsync(userId, cancellationToken);
 
+        // Paso 3b (H2, auditoría): la revocación global debe caer también la ventana de
+        // sesión "ya verificada" (mfa_verified). Sin esto, una sesión nueva (ya sin MFA)
+        // dentro de MfaVerifiedTtl heredaría silenciosamente el step-up del atacante.
+        if (mfaVerifiedSessionStore is not null)
+        {
+            await mfaVerifiedSessionStore.ClearAsync(userId, cancellationToken);
+        }
+
         logger.LogInformation("Todas las sesiones revocadas para usuario {UserId}", userId);
 
         // Paso 4: Disparar evento
@@ -283,6 +292,14 @@ public sealed class SessionOrchestrator(
         if (entry is not null && !entry.IsRevoked)
         {
             await sessionStore.RevokeAsync(tokenHash, cancellationToken: cancellationToken);
+
+            // DIDÁCTICA (H2, auditoría): cerrar la última/una sesión sincronizada con un
+            // logout explícito también invalida la ventana mfa_verified compartida de la
+            // cuenta. Así una sesión posterior no hereda el paso elevado de acciones sensibles.
+            if (mfaVerifiedSessionStore is not null)
+            {
+                await mfaVerifiedSessionStore.ClearAsync(entry.UserId, cancellationToken);
+            }
 
             logger.LogDebug("Sesión cerrada. FamilyId: {FamilyId}, UserId: {UserId}",
                 entry.FamilyId, entry.UserId);

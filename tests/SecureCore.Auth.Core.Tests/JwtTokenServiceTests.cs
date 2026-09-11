@@ -168,6 +168,45 @@ public class JwtTokenServiceTests
         Assert.Contains(claims, c => c.Type == "department" && c.Value == "engineering");
     }
 
+    [Fact]
+    public void AcrClaim_DisabledByDefault_NotEmitted()
+    {
+        var svc = CreateTokenService();
+        var user = _testUser;
+
+        var token = svc.GenerateAccessToken(user);
+        var claims = ReadClaims(token);
+
+        // DIDÁCTICA (S3): acr es opt-in (EmitAcr=false por defecto) para no imponer
+        // semántica de niveles de autenticación al implementador.
+        Assert.DoesNotContain(claims, c => c.Type == "acr");
+    }
+
+    [Fact]
+    public void AcrClaim_EmitAcrEnabled_EmitsConfiguredLevel()
+    {
+        var svc = CreateTokenService(emitAcr: true, acrLevel: "2");
+
+        var token = svc.GenerateAccessToken(_testUser);
+        var claims = ReadClaims(token);
+
+        Assert.Contains(claims, c => c.Type == "acr" && c.Value == "2");
+    }
+
+    [Fact]
+    public void AcrClaim_EmitAcrEnabled_UserClaimWins()
+    {
+        var svc = CreateTokenService(emitAcr: true, acrLevel: "1");
+        var user = _testUser with { Claims = new() { ["acr"] = "2" } };
+
+        var token = svc.GenerateAccessToken(user);
+        var claims = ReadClaims(token);
+
+        // DIDÁCTICA (S3): el claim explícito del implementador (p. ej. subir a AAL2 tras
+        // MFA) manda sobre el valor global configurado.
+        Assert.Contains(claims, c => c.Type == "acr" && c.Value == "2");
+    }
+
     private static IEnumerable<System.Security.Claims.Claim> ReadClaims(string jwt)
     {
         var handler = new System.IdentityModel.Tokens.Jwt.JwtSecurityTokenHandler();
@@ -233,7 +272,9 @@ public class JwtTokenServiceTests
 
     private JwtTokenService CreateTokenService(
         HashSet<string>? allowedSystemClaims = null,
-        Func<UserIdentity, TimeSpan?>? accessTokenLifetimeProvider = null)
+        Func<UserIdentity, TimeSpan?>? accessTokenLifetimeProvider = null,
+        bool emitAcr = false,
+        string? acrLevel = null)
     {
         var jwtOptions = Options.Create(new JwtOptions
         {
@@ -247,7 +288,9 @@ public class JwtTokenServiceTests
         var authOptions = Options.Create(new SecureAuthOptions
         {
             AccessTokenLifetime = TimeSpan.FromMinutes(15),
-            AccessTokenLifetimeProvider = accessTokenLifetimeProvider
+            AccessTokenLifetimeProvider = accessTokenLifetimeProvider,
+            EmitAcr = emitAcr,
+            AcrLevel = acrLevel ?? "1"
         });
 
         return new JwtTokenService(jwtOptions, authOptions, Substitute.For<ILogger<JwtTokenService>>());

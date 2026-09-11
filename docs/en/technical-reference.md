@@ -52,6 +52,9 @@ Defines session lifecycle parameters and lockout policies.
 | `ForgotPasswordRateLimiter` (v3.2.0) | `RateLimiterOptions?` | 5/hour per IP | Optional (see §9) |
 | `MaxAuthRequestBodySize` (v3.2.0) | `int` | 2048 bytes | [256, 8192] (see §4.6) |
 | `AccessTokenLifetimeProvider` (v3.1.5) | `Func<UserIdentity, TimeSpan?>` | null | Optional |
+| `MfaVerifiedTtl` (v3.2.0, S3) | `TimeSpan` | 8 h | "mfa_verified" window; ≤ 0 → 8 h fallback (see §4.9) |
+| `EmitAcr` (v3.2.0, S3) | `bool` | false | Emits the `acr` claim on every token (opt-in) |
+| `AcrLevel` (v3.2.0, S3) | `string` | "1" | Value of the `acr` claim when `EmitAcr` is on |
 
 #### Per-Role Access Token Lifetime (v3.1.5)
 
@@ -145,7 +148,7 @@ the previous behavior remains intact.
 | :--- | :--- | :--- | :--- |
 | `Enabled` | `bool` | false | Activates the S1 subsystem. |
 | `Window` | `TimeSpan` | 5 min | Sliding window: failures older than `Window` no longer count. |
-| `MaxAttempts` | `IReadOnlyDictionary<AccountProtectionScope, int>` | Password 5, MfaLogin 5, Passkey 5, Recovery 3, VerifyAction 5 | Per-factor/action limit. `GetMaxAttempts(scope)` falls back to 5 for unconfigured scopes. |
+| `MaxAttempts` | `IReadOnlyDictionary<AccountProtectionScope, int>` | Password 5, MfaLogin 5, Passkey 5, Recovery 3, VerifyAction 5, PasswordChange 5 | Per-factor/action limit. `GetMaxAttempts(scope)` falls back to 5 for unconfigured scopes. |
 | `EscalationDurations` | `IReadOnlyList<TimeSpan>` | [10 min, 30 min, 1 h, 24 h] | Lockout duration per escalation level. `GetLockDuration(level)` clamps within the list. |
 | `MaxLockDuration` | `TimeSpan` | 24 h | Hard cap: no lockout exceeds this duration. |
 
@@ -170,6 +173,27 @@ services.AddSecureAuthAccountProtection(o =>
 > **Security (audit)**: `AddSecureAuthAccountProtection()` validates the configuration at startup (`.Validate().ValidateOnStart()`): `Window > 0`, `MaxLockDuration > 0`, `EscalationDurations` non-empty with durations > 0 and `MaxAttempts ≥ 1`. Defensively, even **without validation** (direct service construction): `GetWindow()`/`GetMaxLockDuration()` fall back to the defaults (5 min / 24 h) on values ≤ 0, and `GetLockDuration(level)` clamps every duration to the `MaxLockDuration` cap while out-of-range levels / durations ≤ 0 resolve to `MaxLockDuration` — invalid configuration never downgrades the lockout to harmless/fail-open.
 >
 > **DIDACTIC — Configuration precedence**: the `configure` action of `AddSecureAuthAccountProtection(Action<AccountProtectionOptions>)` overrides the `SecureAuth:AccountProtection` section **as a whole** (all properties of the received object, not only the ones you set). To combine sources, set **all** active properties in `configure` or use appsettings only.
+
+### 2.7. VerifyActionOptions (v3.2.0, S3)
+Defines the lifecycle of the **verify-action** OTP code (step-up for sensitive actions). Registered
+via `AddVerifyAction()`, section `SecureAuth:VerifyAction`, validated at startup
+(`.ValidateDataAnnotations().ValidateOnStart()`).
+
+| Property | Type | Default | Validation |
+| :--- | :--- | :--- | :--- |
+| `TtlMinutes` | `int` | 5 | [1, 15] — the code expires even when the attempt only fails |
+| `CodeLength` | `int` | 6 | [6, 8] — number of OTP digits |
+| `MaxSendsPerWindow` (audit, S3) | `int` | 3 | [1, 10] — max sends per user and window (`TtlMinutes`) |
+
+> **DIDACTIC** (H1, audit): `MaxSendsPerWindow` is a **hard throttle that ALWAYS applies**, even
+> without S1. Without it, an attacker with a valid session could issue codes without limit and
+> brute-force the OTP (~10^6 combinations). A successfully validated code renews the throttle
+> (parity with S1). It is in-memory per instance: keep both when using a distributed S1.
+>
+> Step-up does NOT issue tokens by itself: its success opens the shared
+> `mfa_verified` window (`SecureAuthOptions.MfaVerifiedTtl`). The host checks
+> `IMfaVerifiedSessionStore.IsVerifiedAsync(userId)` to decide whether a sensitive mutation may
+> proceed without repeating the code (optional-2FA pattern over an already-authenticated session).
 
 ---
 
@@ -243,6 +267,25 @@ the default is registered with `TryAddScoped`). Keys carry the caller's per-cont
 
 `AccountProtectionResult` exposes `Allowed`, `RemainingAttempts`, `LockEnd` and `EscalationLevel`
 (see § 4.8 for the wiring).
+
+### 3.7. Verified-session and step-up OTP SPI (v3.2.0, S3)
+
+- `IMfaVerifiedSessionStore` — "mfa_verified" window (A-21): `SetVerifiedAsync(userId, method)`,
+  `IsVerifiedAsync(userId)`, `ClearAsync(userId)`. Default `DistributedCacheMfaVerifiedSessionStore`
+  (TTL `SecureAuthOptions.MfaVerifiedTtl`, defensive 8 h fallback; the key stores the verified
+  method and its presence means verified). Registered `TryAddScoped` in `AddMfa`,
+  `AddPasswordAuthentication` and `AddVerifyAction`.
+  - **Lifecycle (H2, audit)**: `SessionOrchestrator` (when an `IMfaVerifiedSessionStore` is
+    registered) calls `ClearAsync(userId)` in both `RevokeAllSessionsAsync` and `LogoutAsync`: a
+    fresh session (without MFA) must not inherit the step-up of a session revoked/closed by an
+    attacker.
+- `IEmailOtpStore` (A-22) — step-up OTP code with **atomic single-use** consumption: only the
+  SHA-256 hash (lowercase hex) is persisted; `ValidateAndRemoveCodeAsync` compares in constant time
+  (`CryptographicOperations.FixedTimeEquals` with a length guard) and consumes the entry by
+  delegating to `ISingleUseTokenStore` (S2). Default `DistributedCacheEmailOtpStore`.
+- `IEmailOtpSender` (A-22) — transports the code to its destination. Default
+  `EmailServiceEmailOtpSender` (adapter over `IEmailService`). Register your own implementation
+  BEFORE `AddVerifyAction()` to override it (TryAdd).
 
 ---
 
@@ -424,6 +467,47 @@ from `SecureAuth:AccountProtection`). Without that registration, `IdentityOrches
 > `LockEnd` is computed as `now + GetLockDuration(level)`, capped at `MaxLockDuration`.
 > Failures during an active lockout are **ignored** (they spend no budget and do not extend the lock).
 
+### 4.9. Verified-session state, verify-action and password (S3, v3.2.0)
+
+**`mfa_verified` window**: `IdentityOrchestrator.CompleteMfaLoginAsync` marks the window with the
+verified method (`SetVerifiedAsync(userId, method.ToLowerInvariant())`) **only** on a successful
+MFA login — a failed MFA attempt never opens it. The window is **additive**: without an
+`IMfaVerifiedSessionStore` registered, the flow behaves exactly as before.
+
+**Step-up `VerifyActionOrchestrator`** (`AddVerifyAction()`):
+
+| Method | Behavior |
+| :--- | :--- |
+| `SendVerifyCodeAsync(userId, channel, cancellationToken)` | Validates the channel (`VerifyActionChannel.Email`), applies the per-user **hard throttle** (H1, audit: `MaxSendsPerWindow` = 3 per window, always active even without S1), fires the send via `IEmailOtpSender`, and ONLY after a successful delivery stores the OTP hash (`IEmailOtpStore`, `VerifyActionOptions.TtlMinutes`/`CodeLength`). Each send spends one unit of the S1 `VerifyAction` scope (anti email-flood); when exhausted it returns a generic failure. Sender errors → generic failure without storing the hash or spending budget (M2, audit; no enumeration). |
+| `VerifyActionAsync(userId, code, cancellationToken)` | Rejects codes whose length differs from `CodeLength` (H3, audit) before touching the store. S1-checked: failure → spends budget (the lockout-triggering failure returns a generic failure). Correct code → **atomic** single-use consume, `RecordSuccessAsync` + throttle renew (budget renewed), opens the `mfa_verified` window with the verified method, and fires `VerifyActionCompleted` (success) or `VerifyActionFailed` (failure). |
+
+**Password with step-up — `ChangePasswordOrchestrator`** (`AddChangePassword()`):
+
+- `CreateAsync(userId, newPassword, cancellationToken)`: for accounts with **no password yet**
+  (passwordless → password flow). Requires the verify-action window to be **open** (M1, audit): the
+  OTP was already consumed in `VerifyActionAsync` (single-use), so this only checks
+  `IMfaVerifiedSessionStore.IsVerifiedAsync(userId)`; closed window → fail-closed
+  `verify_action_required`. Code 409 `password_already_exists` when the account already has a
+  password (idempotency invariant, not a security failure).
+- `ChangeAsync(userId, currentPassword, newPassword, cancellationToken)`: validates the current
+  password against the hasher; returns `invalid_current_password` otherwise (and spends the S1
+  `PasswordChange` budget — M4, audit — when enabled; the current password is capped at 1024
+  characters before Argon2 to prevent memory/CPU amplification — H3, audit). Account without a
+  registered password → `no_password_created`. `SuccessRehashNeeded` spots an outdated hash and
+  updates it.
+- Both rotate the **SecurityStamp** (call to `IUserStore.UpdateSecurityStampAsync`), invalidate the
+  stamp cache (`SecurityStampValidator.InvalidateAsync`), revoke **all** previous sessions
+  (`RevokeAllAsync`) — re-issuing **a new token pair** whose refresh family is **new** (including the
+  in-use family) — and fire `SecurityStampUpdated` (stamp: new).
+- Password policy (NIST SP 800-63B): 8–1024 characters; **no** composition rules; rejection →
+  generic failure (`invalid_password`).
+
+> **NOTE**: `ChangePasswordOrchestrator` accepts optional `IPasswordHasher` and `ITokenService`
+> (null → resolved from DI); `IUserStore` and `ISecurityStampValidator` are **required** (without
+> registered implementations, `AddChangePassword()` fails in ValidateOnBuild). The
+> `/create-password` and `/change-password` endpoints return the **new token pair** in the body
+> (`success.tokens`) so the client adopts the new family.
+
 ---
 
 ## 5. Middleware and Integration Endpoints
@@ -451,6 +535,14 @@ services.AddSecureAuth(options => { ... })
 - `POST /revoke-all`: Global session reset (SecurityStamp change).
 - `POST /forgot-password`: Recovery flow initiation.
 - `POST /reset-password`: Confirmation and credential change.
+
+**S3 (v3.2.0) — opt-in endpoints** (require Bearer authentication; the `userId` comes from the `sub`
+claim; responses use generic messages; 503 when the orchestrator is not registered):
+
+- `POST /verify-action/send`: no body — sends a step-up OTP (user from the `sub` claim; fixed email channel in this version).
+- `POST /verify-action/verify`: `{ code }` — consumes the OTP and opens the window.
+- `POST /create-password`: `{ newPassword }` — creates a password (requires an open step-up window; no `otp` in the body).
+- `POST /change-password`: `{ currentPassword, newPassword }` — changes the password (no step-up).
 
 ---
 

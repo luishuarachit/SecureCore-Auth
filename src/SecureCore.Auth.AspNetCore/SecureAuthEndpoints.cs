@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Routing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Options;
 using SecureCore.Auth.Abstractions.Interfaces;
+using SecureCore.Auth.Abstractions.Models;
 using SecureCore.Auth.Abstractions.Options;
 using SecureCore.Auth.Core.Services;
 
@@ -291,7 +292,180 @@ public static class SecureAuthEndpoints
         .WithDescription("Confirma y actualiza la contraseña con un token válido.")
         .AllowAnonymous();
 
+        // ─────────────────────────────────────────────────────────
+        //  POST /auth/verify-action/send (S3, step-up opt-in)
+        // ─────────────────────────────────────────────────────────
+        // DIDÁCTICA: Endpoint autenticado para solicitar el OTP de verify-action. Si el
+        // orquestador no está registrado responde 503. Los fallos reportan mensajes genéricos
+        // (no-enumeración, sin revelar si el usuario existe o si el envío falló).
+        group.MapPost("/verify-action/send", async (
+            HttpContext httpContext,
+            IServiceProvider serviceProvider,
+            CancellationToken ct) =>
+        {
+            var orchestrator = serviceProvider.GetService<VerifyActionOrchestrator>();
+            if (orchestrator is null)
+            {
+                return Results.Json(
+                    new { error = "verify_action_not_configured", message = "La verificación de acciones sensibles no está configurada." },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            var userId = httpContext.User.FindFirst("sub")?.Value
+                         ?? httpContext.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+            if (userId is null)
+            {
+                return Results.Unauthorized();
+            }
+
+            var result = await orchestrator.SendVerifyCodeAsync(userId, cancellationToken: ct);
+
+            if (result.Success)
+            {
+                return Results.Ok(new { message = "Se envió un código de verificación a tu correo." });
+            }
+
+            return Results.Json(
+                new { error = "verify_action_send_failed", message = result.ErrorMessage ?? "No se pudo enviar el código." },
+                statusCode: StatusCodes.Status400BadRequest);
+        })
+        .WithName("SendVerifyActionCode")
+        .WithDescription("Solicita un código OTP de verify-action para una acción sensible.")
+        .RequireAuthorization();
+
+        // ─────────────────────────────────────────────────────────
+        //  POST /auth/verify-action/verify (S3, step-up opt-in)
+        // ─────────────────────────────────────────────────────────
+        group.MapPost("/verify-action/verify", async (
+            VerifyActionRequest request,
+            HttpContext httpContext,
+            IServiceProvider serviceProvider,
+            CancellationToken ct) =>
+        {
+            var orchestrator = serviceProvider.GetService<VerifyActionOrchestrator>();
+            if (orchestrator is null)
+            {
+                return Results.Json(
+                    new { error = "verify_action_not_configured", message = "La verificación de acciones sensibles no está configurada." },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            var userId = httpContext.User.FindFirst("sub")?.Value
+                         ?? httpContext.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+            if (userId is null)
+            {
+                return Results.Unauthorized();
+            }
+
+            var result = await orchestrator.VerifyActionAsync(userId, request.Code, ct);
+
+            if (result.Success)
+            {
+                return Results.Ok(new { verified = true });
+            }
+
+            return Results.Json(
+                new { verified = false, error = "invalid_code", message = result.ErrorMessage ?? "Código inválido." },
+                statusCode: StatusCodes.Status400BadRequest);
+        })
+        .WithName("VerifyActionCode")
+        .WithDescription("Valida el código OTP y marca la sesión como verify-action verificada.")
+        .RequireAuthorization();
+
+        // ─────────────────────────────────────────────────────────
+        //  POST /auth/create-password (S3, A-22 opt-in)
+        // ─────────────────────────────────────────────────────────
+        // DIDÁCTICA: crea la contraseña de una cuenta passwordless exigiendo la ventana de
+        // verify-action ABIERTA (paso previo: POST /verify-action/send + POST /verify-action/verify).
+        // El OTP se consume en ese paso (M1, auditoría); aquí solo se comprueba la ventana. Al
+        // rotar el SecurityStamp, el access token usado en ESTA petición queda revocado al salir;
+        // por eso la respuesta incluye el nuevo par de tokens, que el cliente debe adoptar.
+        group.MapPost("/create-password", async (
+            CreatePasswordRequest request,
+            HttpContext httpContext,
+            IServiceProvider serviceProvider,
+            CancellationToken ct) =>
+        {
+            var orchestrator = serviceProvider.GetService<ChangePasswordOrchestrator>();
+            if (orchestrator is null)
+            {
+                return Results.Json(
+                    new { error = "change_password_not_configured", message = "El flujo de contraseña no está configurado." },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            var userId = httpContext.User.FindFirst("sub")?.Value
+                         ?? httpContext.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+            if (userId is null)
+            {
+                return Results.Unauthorized();
+            }
+
+            var result = await orchestrator.CreateAsync(userId, request.NewPassword, ct);
+            return MapPasswordChangeResult(result);
+        })
+        .WithName("CreatePassword")
+        .WithDescription("Crea la contraseña de una cuenta sin ella, exigiendo una verificación previa de verify-action.")
+        .RequireAuthorization();
+
+        // ─────────────────────────────────────────────────────────
+        //  POST /auth/change-password (S3, A-22 opt-in)
+        // ─────────────────────────────────────────────────────────
+        group.MapPost("/change-password", async (
+            ChangePasswordRequest request,
+            HttpContext httpContext,
+            IServiceProvider serviceProvider,
+            CancellationToken ct) =>
+        {
+            var orchestrator = serviceProvider.GetService<ChangePasswordOrchestrator>();
+            if (orchestrator is null)
+            {
+                return Results.Json(
+                    new { error = "change_password_not_configured", message = "El flujo de contraseña no está configurado." },
+                    statusCode: StatusCodes.Status503ServiceUnavailable);
+            }
+
+            var userId = httpContext.User.FindFirst("sub")?.Value
+                         ?? httpContext.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+            if (userId is null)
+            {
+                return Results.Unauthorized();
+            }
+
+            var result = await orchestrator.ChangeAsync(userId, request.CurrentPassword, request.NewPassword, ct);
+            return MapPasswordChangeResult(result);
+        })
+        .WithName("ChangePassword")
+        .WithDescription("Cambia la contraseña validando la actual; revoca las sesiones previas.")
+        .RequireAuthorization();
+
         return group;
+    }
+
+    /// <summary>
+    /// Traduce un ChangePasswordResult a una respuesta HTTP con tokens (éxito) o error genérico.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: Los mensajes provienen del orquestador y ya son genéricos; el código de error
+    /// permite al host distinguir la rama programáticamente. El éxito incluye el nuevo par de
+    /// tokens porque la rotación del SecurityStamp revocó el token usado para esta petición.
+    /// </remarks>
+    private static IResult MapPasswordChangeResult(ChangePasswordResult result)
+    {
+        if (result.Success && result.Tokens is not null)
+        {
+            return Results.Ok(new
+            {
+                message = "Contraseña actualizada. El resto de sesiones fueron cerradas.",
+                accessToken = result.Tokens.AccessToken,
+                refreshToken = result.Tokens.RefreshToken,
+                expiresAt = result.Tokens.ExpiresAt
+            });
+        }
+
+        return Results.Json(
+            new { error = result.ErrorCode ?? Abstractions.Models.ChangePasswordError.GenericFailure, message = result.ErrorMessage },
+            statusCode: StatusCodes.Status400BadRequest);
     }
 
     /// <summary>
@@ -383,3 +557,48 @@ public record ForgotPasswordRequest(string Email);
 /// Solicitud de inserción de nueva contraseña ligada a un token.
 /// </summary>
 public record ResetPasswordRequest(string Token, string NewPassword);
+
+/// <summary>
+/// Solicitud de validateación del código OTP de verify-action (S3).
+/// </summary>
+/// <remarks>
+/// DIDÁCTICA (H3): además del mínimo, fijamos un máximo de 8 dígitos (límite superior de
+/// <c>VerifyActionOptions.CodeLength</c>) para rechazar en binding cuerpos absurdos antes
+/// de que lleguen al hash/store del orquestador.
+/// </remarks>
+public record VerifyActionRequest(
+    [property: Required(ErrorMessage = "El código es requerido.")]
+    [property: MinLength(6, ErrorMessage = "El código debe tener al menos 6 dígitos.")]
+    [property: MaxLength(8, ErrorMessage = "El código no puede superar 8 dígitos.")]
+    string Code);
+
+/// <summary>
+/// Solicitud de creación de contraseña con ventana de verify-action previa (S3, A-22).
+/// </summary>
+/// <remarks>
+/// DIDÁCTICA (M1, auditoría): NO se incluye OTP en el cuerpo. El código ya se consumió en
+/// POST /verify-action/verify (single-use atómico); crear la contraseña solo requiere que
+/// la ventana mfa_verified siga abierta.
+/// </remarks>
+public record CreatePasswordRequest(
+    [property: Required(ErrorMessage = "La nueva contraseña es requerida.")]
+    [property: MinLength(8, ErrorMessage = "La contraseña debe tener al menos 8 caracteres.")]
+    [property: MaxLength(1024, ErrorMessage = "La contraseña no puede superar 1024 caracteres.")]
+    string NewPassword);
+
+/// <summary>
+/// Solicitud de cambio de contraseña validando la contraseña actual (S3, A-22).
+/// </summary>
+/// <remarks>
+/// DIDÁCTICA (H3, auditoría): la contraseña actual se acota a 1024 caracteres en el binding
+/// (y de nuevo en el orquestador) para impedir la amplificación de Argon2 con inputs gigantes.
+/// </remarks>
+public record ChangePasswordRequest(
+    [property: Required(ErrorMessage = "La contraseña actual es requerida.")]
+    [property: MaxLength(1024, ErrorMessage = "La contraseña actual no puede superar 1024 caracteres.")]
+    string CurrentPassword,
+
+    [property: Required(ErrorMessage = "La nueva contraseña es requerida.")]
+    [property: MinLength(8, ErrorMessage = "La contraseña debe tener al menos 8 caracteres.")]
+    [property: MaxLength(1024, ErrorMessage = "La contraseña no puede superar 1024 caracteres.")]
+    string NewPassword);

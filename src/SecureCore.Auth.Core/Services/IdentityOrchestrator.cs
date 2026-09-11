@@ -38,12 +38,14 @@ public sealed class IdentityOrchestrator(
     IMfaService mfaService,
     ILogger<IdentityOrchestrator> logger,
     IAccountProtectionService? accountProtectionService = null,
-    IOptions<AccountProtectionOptions>? accountProtectionOptions = null)
+    IOptions<AccountProtectionOptions>? accountProtectionOptions = null,
+    IMfaVerifiedSessionStore? mfaVerifiedSessionStore = null)
 {
     private readonly SecureAuthOptions _options = options.Value;
     private readonly MfaOptions _mfaOptions = mfaOptions.Value;
     private readonly IAccountProtectionService? _accountProtection = accountProtectionService;
     private readonly AccountProtectionOptions? _accountProtectionOptions = accountProtectionOptions?.Value;
+    private readonly IMfaVerifiedSessionStore? _mfaVerifiedSessionStore = mfaVerifiedSessionStore;
 
     /// <summary>
     /// true cuando el subsistema S1 está registrado Y habilitado (opt-in, D-03).
@@ -264,6 +266,17 @@ public sealed class IdentityOrchestrator(
         await mfaSessionStore.ConsumeMfaSessionTokenAsync(mfaSessionToken, cancellationToken);
 
         await userStore.ResetFailedAccessCountAsync(userId, cancellationToken);
+
+        // DIDÁCTICA (S3): tras una verificación MFA exitosa, se abre (o renueva) la ventana
+        // "mfa_verified" del usuario. Los claims amr/mfa_method describen cómo se emitió ESTE
+        // par de tokens; la ventana permite al host saber, en peticiones posteriores, que el
+        // usuario verificó un factor dentro de MfaVerifiedTtl (step-up, mutaciones sensibles).
+        // Si el store no está registrado (sin S3), el comportamiento previo permanece igual.
+        if (_mfaVerifiedSessionStore is not null && mfaResult.VerifiedMethod.HasValue)
+        {
+            await _mfaVerifiedSessionStore.SetVerifiedAsync(
+                userId, mfaResult.VerifiedMethod.Value.ToString().ToLowerInvariant(), cancellationToken);
+        }
 
         var customClaims = user.Claims ?? [];
         if (mfaResult.VerifiedMethod.HasValue)

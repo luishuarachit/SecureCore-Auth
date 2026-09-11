@@ -159,6 +159,15 @@ public sealed class JwtTokenService(
             }
         }
 
+        // DIDÁCTICA (S3): claim opcional "acr" (Authentication Context Class Reference)
+        // activado con SecureAuthOptions.EmitAcr. Si el implementador ya inyectó "acr"
+        // vía UserIdentity.Claims (claim explícito por sesión, ej. tras MFA), ese valor
+        // gana: el claim ya está en el diccionario y no lo sobrescribimos.
+        if (_authOptions.EmitAcr && !claims.ContainsKey("acr"))
+        {
+            claims["acr"] = _authOptions.AcrLevel;
+        }
+
         var tokenDescriptor = new SecurityTokenDescriptor
         {
             Subject = new ClaimsIdentity(

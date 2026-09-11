@@ -322,6 +322,37 @@ public class SecureAuthOptions
     /// </code>
     /// </remarks>
     public Func<UserIdentity, TimeSpan?>? AccessTokenLifetimeProvider { get; set; }
+
+    /// <summary>
+    /// TTL de la ventana "sesión MFA-verificada" (S3, A-21). Por defecto: 8 horas.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: Durante esta ventana, <c>IMfaVerifiedSessionStore.IsVerifiedAsync(userId)</c>
+    /// devuelve true. La marca blinda el step-up: un usuario que verificó un factor (login MFA
+    /// o verify-action) puede completar mutaciones sensibles dentro de la ventana sin repetir
+    /// el código. Los tokens JWT no dependen de esta ventana; es un estado de aplicación
+    /// consultable por el host (middleware, endpoints propios, etc.).
+    /// </remarks>
+    public TimeSpan MfaVerifiedTtl { get; set; } = TimeSpan.FromHours(8);
+
+    /// <summary>
+    /// Emite el claim "acr" (Authentication Context Class Reference) en los tokens (S3, A-14).
+    /// Por defecto: false (opt-in, D-03).
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA: <c>acr</c> expresa el nivel de confianza de la autenticación (NIST SP 800-63B
+    /// AAL: "1" = single-factor, "2" = MFA). Está desactivado por defecto para no imponer una
+    /// semántica; al activarlo se emite el valor de <see cref="AcrLevel"/> en todos los tokens,
+    /// o el que el implementador inyecte vía <c>UserIdentity.Claims["acr"]</c> (gana el claim
+    /// explícito). Se respeta así el comentario de JwtTokenService que deja acr a discreción
+    /// del implementador, con un camino cómodo para habilitarlo.
+    /// </remarks>
+    public bool EmitAcr { get; set; } = false;
+
+    /// <summary>
+    /// Valor del claim "acr" emitido cuando <see cref="EmitAcr"/> está activo. Por defecto: "1".
+    /// </summary>
+    public string AcrLevel { get; set; } = "1";
 }
 
 /// <summary>

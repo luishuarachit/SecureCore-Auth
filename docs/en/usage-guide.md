@@ -915,6 +915,61 @@ POST /auth/reset-password
 
 ---
 
+### Use Case 10: Step-up verification and creating/changing a password (v3.2.0, S3)
+
+**Scenario**: you want to protect sensitive actions (change password, delete data) with a second
+verification **without forcing a full login**, and let users create or change their password.
+
+**Configuration** (safe defaults; nothing else required):
+
+```csharp
+builder.Services.AddSecureAuth(options => { ... });
+builder.Services.AddScoped<IEmailService, MyEmailService>();  // OTP delivery
+builder.Services.AddVerifyAction();                           // step-up + mfa_verified window
+builder.Services.AddChangePassword();                         // create/change password
+```
+
+**Step 1 — Send and verify the code (step-up)**. The sensitive action first runs the verification;
+its success opens a **bounded window** (8 h by default) so the host can check
+`IMfaVerifiedSessionStore.IsVerifiedAsync(userId)` and proceed without repeating the code.
+The endpoints are authenticated (the user is identified by the `sub` claim; sending takes no body).
+
+```http
+POST /auth/verify-action/send
+POST /auth/verify-action/verify { "code": "483920" }
+```
+
+**Step 2 — Create password (accounts without one, e.g. social/passkey login)**. Requires the
+step-up window to be **open**: the code was already consumed in step 1 (single-use), so
+`create-password` only checks `IsVerifiedAsync(userId)` and does NOT expect an `otp` in the body.
+
+```http
+POST /auth/create-password { "newPassword": "NewPassword" }
+```
+
+**Step 2' — Change password (with a current password)**. No step-up: validates the current password.
+
+```http
+POST /auth/change-password { "currentPassword": "Current", "newPassword": "New" }
+```
+
+Both return the **new token pair** (`accessToken`/`refreshToken`): since all previous sessions are
+revoked and the SecurityStamp rotated, the response carries the updated family so the client keeps
+working without re-logging in.
+
+**Protections** (S1 + S2/S3): the OTP is single-use, expires in 5 min and is stored only as a hash.
+Every send and every failure counts against the `VerifyAction` scope (anti email-flood and brute
+force), and a hard per-user throttle (3 sends per window, `MaxSendsPerWindow`) always applies, even
+without S1. Changing the password also guards against current-password brute force with the
+`PasswordChange` scope (S1). Error responses are always generic.
+
+> **DIDACTIC — When is step-up required?** A bounded `mfa_verified` window (8 h) limits the risk:
+> an attacker who steals an already-authenticated session cannot repeat the verification
+> indefinitely. Tune `SecureAuthOptions.MfaVerifiedTtl` to the risk of your operation
+> (0 = require verify-action on every sensitive operation).
+
+---
+
 ## Advanced Features
 
 ### Passkeys / WebAuthn

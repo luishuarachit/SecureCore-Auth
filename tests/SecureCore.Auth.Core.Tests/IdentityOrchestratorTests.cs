@@ -192,3 +192,103 @@ public class IdentityOrchestratorTests
             Arg.Any<CancellationToken>());
     }
 }
+
+/// <summary>
+/// Tests de S3 en IdentityOrchestrator: CompleteMfaLoginAsync marca la ventana mfa_verified.
+/// </summary>
+public class IdentityOrchestratorMfaVerifiedTests
+{
+    private readonly IUserStore _userStore = Substitute.For<IUserStore>();
+    private readonly IPasswordHasher _passwordHasher = Substitute.For<IPasswordHasher>();
+    private readonly ITokenService _tokenService = Substitute.For<ITokenService>();
+    private readonly ISessionStore _sessionStore = Substitute.For<ISessionStore>();
+    private readonly IAuthEventDispatcher _eventDispatcher = Substitute.For<IAuthEventDispatcher>();
+    private readonly IMfaSessionStore _mfaSessionStore = Substitute.For<IMfaSessionStore>();
+    private readonly IMfaService _mfaService = Substitute.For<IMfaService>();
+    private readonly IMfaVerifiedSessionStore _mfaVerified = Substitute.For<IMfaVerifiedSessionStore>();
+
+    private IdentityOrchestrator CreateOrchestrator()
+    {
+        var authOptions = Options.Create(new SecureAuthOptions { RefreshTokenLifetime = TimeSpan.FromDays(7) });
+        var mfaOptions = Options.Create(new MfaOptions { Enabled = true, AllowedMethods = new List<string> { "totp", "email" } });
+        var lockoutManager = new LockoutManager(_userStore, authOptions, NullLogger<LockoutManager>.Instance);
+
+        return new IdentityOrchestrator(
+            _userStore,
+            _passwordHasher,
+            _tokenService,
+            _sessionStore,
+            lockoutManager,
+            _eventDispatcher,
+            authOptions,
+            mfaOptions,
+            _mfaSessionStore,
+            _mfaService,
+            NullLogger<IdentityOrchestrator>.Instance,
+            accountProtectionService: null,
+            accountProtectionOptions: null,
+            mfaVerifiedSessionStore: _mfaVerified);
+    }
+
+    private UserIdentity CreateMfaUser() => new()
+    {
+        Id = "u1",
+        Email = "test@example.com",
+        PasswordHash = "hashed-password",
+        SecurityStamp = Guid.NewGuid().ToString(),
+        TwoFactorEnabled = true,
+        MfaEnrollmentStatus = MfaEnrollmentStatus.Enrolled,
+        PreferredMfaMethod = "totp"
+    };
+
+    [Fact]
+    public async Task CompleteMfaLoginAsync_Success_MarksMfaVerifiedWindow()
+    {
+        // Arrange
+        var orchestrator = CreateOrchestrator();
+        _mfaSessionStore.ValidateMfaSessionTokenAsync("sess", Arg.Any<CancellationToken>())
+            .Returns("u1");
+        _userStore.FindByIdAsync("u1", Arg.Any<CancellationToken>())
+            .Returns(CreateMfaUser());
+        _mfaService.VerifyAsync("u1", "123456", Arg.Any<CancellationToken>())
+            .Returns(new MfaVerificationResult(true, null, MfaMethod.Totp));
+        _tokenService.GenerateTokenPairAsync(Arg.Any<UserIdentity>(), Arg.Any<CancellationToken>())
+            .Returns(new TokenResponse("jwt", "refresh", DateTimeOffset.UtcNow.AddMinutes(15)));
+        _tokenService.HashRefreshToken(Arg.Any<string>())
+            .Returns("hash");
+
+        // Act
+        var (result, _) = await orchestrator.CompleteMfaLoginAsync("sess", "123456");
+
+        // Assert
+        Assert.Equal(SignInResult.Success, result);
+        await _mfaVerified.Received(1).SetVerifiedAsync("u1", "totp", Arg.Any<CancellationToken>());
+
+        // El par de tokens se emite con claims de método MFA (comportamiento previo intacto).
+        await _tokenService.Received(1).GenerateTokenPairAsync(
+            Arg.Is<UserIdentity>(u =>
+                u.Claims!.ContainsKey("amr") && u.Claims["amr"] == "mfa" &&
+                u.Claims.ContainsKey("mfa_method") && u.Claims["mfa_method"] == "totp"),
+            Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task CompleteMfaLoginAsync_FailedMfa_DoesNotMarkVerified()
+    {
+        // Arrange
+        var orchestrator = CreateOrchestrator();
+        _mfaSessionStore.ValidateMfaSessionTokenAsync("sess", Arg.Any<CancellationToken>())
+            .Returns("u1");
+        _userStore.FindByIdAsync("u1", Arg.Any<CancellationToken>())
+            .Returns(CreateMfaUser());
+        _mfaService.VerifyAsync("u1", "000000", Arg.Any<CancellationToken>())
+            .Returns(new MfaVerificationResult(false, "Código inválido", null));
+
+        // Act
+        var (result, _) = await orchestrator.CompleteMfaLoginAsync("sess", "000000");
+
+        // Assert: sin verificación, sin ventana.
+        Assert.Equal(SignInResult.Failed, result);
+        await _mfaVerified.DidNotReceiveWithAnyArgs().SetVerifiedAsync(Arg.Any<string>(), Arg.Any<string>(), Arg.Any<CancellationToken>());
+    }
+}

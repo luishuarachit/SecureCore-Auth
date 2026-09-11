@@ -44,7 +44,8 @@ public class AccountProtectionOptions
             [AccountProtectionScope.MfaLogin] = 5,
             [AccountProtectionScope.Passkey] = 5,
             [AccountProtectionScope.Recovery] = 3,
-            [AccountProtectionScope.VerifyAction] = 5
+            [AccountProtectionScope.VerifyAction] = 5,
+            [AccountProtectionScope.PasswordChange] = 5
         };
 
     /// <summary>
@@ -59,7 +60,7 @@ public class AccountProtectionOptions
 
     /// <summary>
     /// Intentos máximos por scope antes de activar un lockout escalonado.
-    /// Defaults: Password/MfaLogin/Passkey/VerifyAction 5, Recovery 3.
+    /// Defaults: Password/MfaLogin/Passkey/VerifyAction/PasswordChange 5, Recovery 3.
     /// </summary>
     public IReadOnlyDictionary<AccountProtectionScope, int> MaxAttempts { get; set; } = DefaultMaxAttempts;
 

@@ -25,7 +25,10 @@ public enum AccountProtectionScope
     Recovery,
 
     /// <summary>Verificación temporal para acciones sensibles (step-up).</summary>
-    VerifyAction
+    VerifyAction,
+
+    /// <summary>Cambio/creación de contraseña validando la contraseña actual (M4, auditoría).</summary>
+    PasswordChange
 }
 
 /// <summary>
