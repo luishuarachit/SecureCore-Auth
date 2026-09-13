@@ -1,10 +1,10 @@
-using System.IdentityModel.Tokens.Jwt;
 using System.Security.Cryptography;
 using System.Text;
 using Fido2NetLib;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging;
@@ -40,6 +40,11 @@ public class SecureAuthConfiguration
     /// <summary>
     /// Opciones de MFA (Autenticación Multifactor).
     /// </summary>
+    /// <remarks>
+    /// OBSOLETO (F8, auditoría): nunca se vinculó a <c>MfaOptions</c> (el configure de <c>AddMfa</c>
+    /// es el camino real). Se conserva por compatibilidad; eliminar en v4.
+    /// </remarks>
+    [Obsolete("Use AddMfa(configure) instead. This property will be removed in a future version.")]
     public MfaOptions Mfa { get; set; } = new();
 }
 
@@ -64,13 +69,15 @@ public class SecureAuthBuilder(IServiceCollection services)
     /// <returns>El builder para encadenamiento.</returns>
     public SecureAuthBuilder AddPasswordAuthentication()
     {
-        Services.AddSingleton<IPasswordHasher, Argon2PasswordHasher>();
+        // DIDÁCTICA (F7): TryAdd para respetar overrides previos del host; el patrón
+        // .AddPasswordAuthentication().AddMfa() no duplica el stack MFA.
+        Services.TryAddSingleton<IPasswordHasher, Argon2PasswordHasher>();
 
-        Services.AddSingleton<ITotpService, TotpService>();
+        Services.TryAddSingleton<ITotpService, TotpService>();
         Services.AddMemoryCache();
-        Services.AddSingleton<IMfaSessionStore, JwtMfaSessionService>();
-        Services.AddSingleton<IMfaEncryptionService, AesMfaEncryptionService>();
-        Services.AddScoped<IEmailMfaService, EmailMfaService>();
+        Services.TryAddSingleton<IMfaSessionStore, JwtMfaSessionService>();
+        Services.TryAddSingleton<IMfaEncryptionService, AesMfaEncryptionService>();
+        Services.TryAddScoped<IEmailMfaService, EmailMfaService>();
 
         // DIDÁCTICA: IEmailService (transporte de email) es responsabilidad del
         // implementador. Se registra un default NullEmailService que lanza al usarse;
@@ -89,7 +96,7 @@ public class SecureAuthBuilder(IServiceCollection services)
         // ANTES (TryAdd lo respeta).
         Services.TryAddScoped<IMfaVerifiedSessionStore, DistributedCacheMfaVerifiedSessionStore>();
 
-        Services.AddScoped<IMfaService, MfaOrchestrator>();
+        Services.TryAddScoped<IMfaService, MfaOrchestrator>();
 
         Services.AddScoped<IdentityOrchestrator>();
         return this;
@@ -230,37 +237,26 @@ public class SecureAuthBuilder(IServiceCollection services)
     /// <returns>El builder para encadenamiento.</returns>
     public SecureAuthBuilder AddMfa(Action<MfaOptions>? configure = null)
     {
+        // DIDÁCTICA (F8): BindConfiguration vincula "SecureAuth:Mfa" y el configure del host muta la
+        // instancia YA vinculada (appsettings = base, Fluent = overlay). Antes se copiaba desde un
+        // MfaOptions con defaults, sobrescribiendo appsettings para props no tocadas.
         Services.AddOptions<MfaOptions>()
             .BindConfiguration(MfaOptions.SectionName)
-            .PostConfigure(opt =>
-            {
-                if (configure is not null)
-                {
-                    var overrides = new MfaOptions();
-                    configure(overrides);
-                    opt.Enabled = overrides.Enabled;
-                    opt.RequiredByDefault = overrides.RequiredByDefault;
-                    opt.AllowedMethods = overrides.AllowedMethods;
-                    opt.AllowUserEnrollment = overrides.AllowUserEnrollment;
-                    opt.AllowUserDisable = overrides.AllowUserDisable;
-                    opt.EnableRecoveryCodes = overrides.EnableRecoveryCodes;
-                    opt.RecoveryCodeLifetimeDays = overrides.RecoveryCodeLifetimeDays;
-                    opt.TotpIssuer = overrides.TotpIssuer;
-                    opt.EncryptionKey = overrides.EncryptionKey;
-                }
-            })
+            .Configure(opt => configure?.Invoke(opt))
             .ValidateDataAnnotations()
             .ValidateOnStart();
 
-        Services.AddSingleton<ITotpService, TotpService>();
+        // DIDÁCTICA (F7): TryAdd para que el host que registró su implementación ANTES no la vea
+        // pisada (libertad de override); AddPasswordAuthentication().AddMfa() no duplica el stack.
+        Services.TryAddSingleton<ITotpService, TotpService>();
         Services.AddMemoryCache();
-        Services.AddSingleton<IMfaSessionStore, JwtMfaSessionService>();
-        Services.AddSingleton<IMfaEncryptionService, AesMfaEncryptionService>();
-        Services.AddScoped<IEmailMfaService, EmailMfaService>();
+        Services.TryAddSingleton<IMfaSessionStore, JwtMfaSessionService>();
+        Services.TryAddSingleton<IMfaEncryptionService, AesMfaEncryptionService>();
+        Services.TryAddScoped<IEmailMfaService, EmailMfaService>();
         AddEmailServiceDefault(Services);
         Services.TryAddScoped<IMfaCodeStore, DistributedCacheMfaCodeStore>();
         Services.TryAddScoped<IMfaVerifiedSessionStore, DistributedCacheMfaVerifiedSessionStore>();
-        Services.AddScoped<IMfaService, MfaOrchestrator>();
+        Services.TryAddScoped<IMfaService, MfaOrchestrator>();
 
         // DIDÁCTICA (F5, A-20): los recovery codes consumen su entrada con la primitiva
         // single-use atómica (S2) y su default sobre IDistributedCache. Garantizamos el
@@ -271,7 +267,7 @@ public class SecureAuthBuilder(IServiceCollection services)
         // responde por EnableRecoveryCodes aquí: la opción es late-bound y el orquestador la
         // valida en cada llamada. El host que no los quiera simplemente no agrega los endpoints.
         Services.TryAddScoped<IRecoveryCodeStore, DistributedCacheRecoveryCodeStore>();
-        Services.AddScoped<RecoveryCodeOrchestrator>();
+        Services.TryAddScoped<RecoveryCodeOrchestrator>();
 
         return this;
     }
@@ -516,38 +512,16 @@ public static class ServiceCollectionExtensions
     {
         ArgumentNullException.ThrowIfNull(configure);
 
-        // Aplicar la configuración del usuario
-        var config = new SecureAuthConfiguration();
-        configure(config);
-
-        // Registrar las opciones en el sistema de IOptions<T>
-        services.Configure<SecureAuthOptions>(opt =>
-        {
-            opt.AccessTokenLifetime = config.Auth.AccessTokenLifetime;
-            opt.RefreshTokenLifetime = config.Auth.RefreshTokenLifetime;
-            opt.GracePeriodSeconds = config.Auth.GracePeriodSeconds;
-            opt.MaxFailedAttempts = config.Auth.MaxFailedAttempts;
-            opt.LockoutDurations = config.Auth.LockoutDurations;
-            opt.ClockSkew = config.Auth.ClockSkew;
-            opt.SecurityStampCacheDuration = config.Auth.SecurityStampCacheDuration;
-            opt.ForgotPasswordRateLimiter = config.Auth.ForgotPasswordRateLimiter;
-        });
+        // DIDÁCTICA (F8): el bootstrap materializa las opciones de forma diferida: vincula
+        // appsettings en un SecureAuthConfiguration y ejecuta el configure del host UNA vez sobre
+        // esas instancias (appsettings = base, Fluent = overlay). Soluciona estructuralmente el
+        // merge appsettings ↔ Fluent de la limitación A de F7 (§11).
+        services.AddSingleton(new SecureAuthOptionsBootstrap(configure));
 
         // Registrar y validar opciones de JWT
         services.AddOptions<JwtOptions>()
-            .BindConfiguration(JwtOptions.SectionName) // Permitir bind desde appsettings
-            .PostConfigure(opt =>
-            {
-                // Sobrescribir con lo configurado en la Fluent API si se proporcionó
-                if (!string.IsNullOrEmpty(config.Jwt.Issuer)) opt.Issuer = config.Jwt.Issuer;
-                if (!string.IsNullOrEmpty(config.Jwt.Audience)) opt.Audience = config.Jwt.Audience;
-                if (!string.IsNullOrEmpty(config.Jwt.SigningKey)) opt.SigningKey = config.Jwt.SigningKey;
-                if (!string.IsNullOrEmpty(config.Jwt.Algorithm)) opt.Algorithm = config.Jwt.Algorithm;
-                if (!string.IsNullOrEmpty(config.Jwt.PrivateKey)) opt.PrivateKey = config.Jwt.PrivateKey;
-                if (!string.IsNullOrEmpty(config.Jwt.PublicKey)) opt.PublicKey = config.Jwt.PublicKey;
-                if (config.Jwt.AllowedSystemClaims.Count > 0)
-                    opt.AllowedSystemClaims = new HashSet<string>(config.Jwt.AllowedSystemClaims);
-            })
+            .Configure<SecureAuthOptionsBootstrap, IConfiguration>((opt, bootstrap, configuration) =>
+                CopyJwtOptions(bootstrap.GetOrCreate(configuration).Jwt, opt))
             .ValidateDataAnnotations()
             .ValidateOnStart();
 
@@ -555,34 +529,22 @@ public static class ServiceCollectionExtensions
         // Esto asegura que cualquier problema de configuración se detecte en startup, no en runtime
         services.AddSingleton<IValidateOptions<JwtOptions>>(new JwtOptionsValidator());
         // El segundo validador solo da warnings en producción, no falla
-        services.AddSingleton<IValidateOptions<JwtOptions>>(new JwtProductionSecurityValidator("Development"));
+        services.AddSingleton<IValidateOptions<JwtOptions>>(sp =>
+            new JwtProductionSecurityValidator(
+                sp.GetService<Microsoft.Extensions.Hosting.IHostEnvironment>(),
+                sp.GetRequiredService<Microsoft.Extensions.Logging.ILogger<JwtProductionSecurityValidator>>()));
 
         // Registrar y validar opciones de Argon2
         services.AddOptions<Argon2Options>()
-            .PostConfigure(opt =>
-            {
-                opt.MemorySize = config.Argon2.MemorySize;
-                opt.Iterations = config.Argon2.Iterations;
-                opt.Parallelism = config.Argon2.Parallelism;
-                opt.SaltSize = config.Argon2.SaltSize;
-                opt.HashSize = config.Argon2.HashSize;
-            })
+            .Configure<SecureAuthOptionsBootstrap, IConfiguration>((opt, bootstrap, configuration) =>
+                CopyArgon2Options(bootstrap.GetOrCreate(configuration).Argon2, opt))
             .ValidateDataAnnotations()
             .ValidateOnStart();
 
         // Registrar y validar opciones generales
         services.AddOptions<SecureAuthOptions>()
-            .PostConfigure(opt =>
-            {
-                opt.AccessTokenLifetime = config.Auth.AccessTokenLifetime;
-                opt.RefreshTokenLifetime = config.Auth.RefreshTokenLifetime;
-                opt.GracePeriodSeconds = config.Auth.GracePeriodSeconds;
-                opt.MaxFailedAttempts = config.Auth.MaxFailedAttempts;
-                opt.LockoutDurations = config.Auth.LockoutDurations;
-                opt.ClockSkew = config.Auth.ClockSkew;
-                opt.SecurityStampCacheDuration = config.Auth.SecurityStampCacheDuration;
-                opt.ForgotPasswordRateLimiter = config.Auth.ForgotPasswordRateLimiter;
-            })
+            .Configure<SecureAuthOptionsBootstrap, IConfiguration>((opt, bootstrap, configuration) =>
+                CopyAuthOptions(bootstrap.GetOrCreate(configuration).Auth, opt))
             .ValidateDataAnnotations()
             .ValidateOnStart();
 
@@ -700,53 +662,74 @@ public static class ServiceCollectionExtensions
                 sp.GetRequiredService<IHttpContextAccessor>(),
                 sp.GetRequiredService<AuthEventDispatcher>()));
 
-        // Configurar autenticación JWT Bearer
-        services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
-            .AddJwtBearer(options =>
-            {
-                options.TokenValidationParameters = new TokenValidationParameters
-                {
-                    ValidateIssuer = true,
-                    ValidateAudience = true,
-                    ValidateLifetime = true,
-                    ValidateIssuerSigningKey = true,
-                    ValidIssuer = config.Jwt.Issuer,
-                    ValidAudience = config.Jwt.Audience,
-                    IssuerSigningKey = CreateIssuerSigningKey(config.Jwt),
-                    ClockSkew = config.Auth.ClockSkew
-                };
-
-                // DIDÁCTICA (A-24): hook OPT-IN de blacklist de access tokens. Con el default
-                // NoOpTokenBlacklist el chequeo es no-op (devuelve false); el host que registra su
-                // implementación consigue que un jti revocado en /logout falle la autenticación.
-                // El jti se lee del token validado (context.SecurityToken.Id) sin replicar el parser.
-                options.Events = new JwtBearerEvents
-                {
-                    OnTokenValidated = async context =>
-                    {
-                        var blacklist = context.HttpContext.RequestServices.GetService<ITokenBlacklist>();
-                        if (blacklist is null)
-                        {
-                            return;
-                        }
-
-                        var jti = (context.SecurityToken as JwtSecurityToken)?.Id;
-                        if (string.IsNullOrEmpty(jti))
-                        {
-                            return;
-                        }
-
-                        if (await blacklist.IsBlacklistedAsync(jti, context.HttpContext.RequestAborted))
-                        {
-                            context.Fail("El token de acceso fue revocado.");
-                        }
-                    }
-                };
-            });
+        // Configurar autenticación JWT Bearer (F7, A-26): la validación se configura desde
+        // IOptions<JwtOptions> (misma fuente que la emisión) vía ConfigureJwtBearerOptions.
+        services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme).AddJwtBearer();
+        services.ConfigureOptions<ConfigureJwtBearerOptions>();
 
         services.AddAuthorization();
 
         return new SecureAuthBuilder(services);
+    }
+
+    /// <summary>
+    /// Copia TODAS las propiedades de <paramref name="source"/> a <paramref name="target"/>.
+    /// </summary>
+    /// <remarks>
+    /// DIDÁCTICA (F7): la Fluent API (<c>config.Auth</c> es un <see cref="SecureAuthOptions"/>) debe
+    /// sobrescribir COMPLETO el objeto vinculado de appsettings (una sola fuente). Una copia parcial
+    /// dejaba propiedades sin efecto silenciosamente (p. ej. <c>RateLimiter</c>,
+    /// <c>MaxAuthRequestBodySize</c>, <c>EmitAmr</c>).
+    /// </remarks>
+    private static void CopyAuthOptions(SecureAuthOptions source, SecureAuthOptions target)
+    {
+        target.AccessTokenLifetime = source.AccessTokenLifetime;
+        target.RefreshTokenLifetime = source.RefreshTokenLifetime;
+        target.GracePeriodSeconds = source.GracePeriodSeconds;
+        target.MaxFailedAttempts = source.MaxFailedAttempts;
+        target.LockoutDurations = source.LockoutDurations;
+        target.ClockSkew = source.ClockSkew;
+        target.SecurityStampCacheDuration = source.SecurityStampCacheDuration;
+        target.RateLimiter = source.RateLimiter;
+        target.OperationLock = source.OperationLock;
+        target.ForgotPasswordRateLimiter = source.ForgotPasswordRateLimiter;
+        target.MaxAuthRequestBodySize = source.MaxAuthRequestBodySize;
+        target.MaxWebAuthnRequestBodySize = source.MaxWebAuthnRequestBodySize;
+        target.MfaVerifiedTtl = source.MfaVerifiedTtl;
+        target.EmitAcr = source.EmitAcr;
+        target.AcrLevel = source.AcrLevel;
+        target.EmitAmr = source.EmitAmr;
+        target.WebAuthnBeginRateLimiter = source.WebAuthnBeginRateLimiter;
+        target.WebAuthnCompleteRateLimiter = source.WebAuthnCompleteRateLimiter;
+        target.RecoveryVerifyRateLimiter = source.RecoveryVerifyRateLimiter;
+        target.RecoveryUseRateLimiter = source.RecoveryUseRateLimiter;
+        target.AccessTokenLifetimeProvider = source.AccessTokenLifetimeProvider;
+    }
+
+    /// <summary>
+    /// Copia las propiedades de <paramref name="source"/> a <paramref name="target"/> (F8).
+    /// </summary>
+    private static void CopyJwtOptions(JwtOptions source, JwtOptions target)
+    {
+        target.Issuer = source.Issuer;
+        target.Audience = source.Audience;
+        target.SigningKey = source.SigningKey;
+        target.Algorithm = source.Algorithm;
+        target.PrivateKey = source.PrivateKey;
+        target.PublicKey = source.PublicKey;
+        target.AllowedSystemClaims = new HashSet<string>(source.AllowedSystemClaims);
+    }
+
+    /// <summary>
+    /// Copia las propiedades de <paramref name="source"/> a <paramref name="target"/> (F8).
+    /// </summary>
+    private static void CopyArgon2Options(Argon2Options source, Argon2Options target)
+    {
+        target.MemorySize = source.MemorySize;
+        target.Iterations = source.Iterations;
+        target.Parallelism = source.Parallelism;
+        target.SaltSize = source.SaltSize;
+        target.HashSize = source.HashSize;
     }
 
     /// <summary>
@@ -810,7 +793,7 @@ public static class ServiceCollectionExtensions
     /// La clave pública puede distribuirse libremente (no es sensible).
     /// Para HS256, usamos la misma SigningKey (simétrica).
     /// </remarks>
-    private static SecurityKey CreateIssuerSigningKey(JwtOptions jwtOptions)
+    internal static SecurityKey CreateIssuerSigningKey(JwtOptions jwtOptions)
     {
         var algorithm = jwtOptions.Algorithm.ToUpperInvariant();
 
@@ -823,7 +806,7 @@ public static class ServiceCollectionExtensions
         };
     }
 
-    private static SecurityKey CreateAsymmetricSecurityKey(JwtOptions jwtOptions)
+    internal static SecurityKey CreateAsymmetricSecurityKey(JwtOptions jwtOptions)
     {
         if (string.IsNullOrEmpty(jwtOptions.PublicKey))
         {

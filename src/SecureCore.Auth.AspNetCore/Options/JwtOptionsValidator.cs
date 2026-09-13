@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SecureCore.Auth.Abstractions.Options;
 
@@ -149,14 +151,17 @@ public class JwtOptionsValidator : IValidateOptions<JwtOptions>
 /// Por ejemplo, usar HS256 en lugar de RS256/ES256 puede ser aceptable para
 /// desarrollo pero riesgoso para producción distribuida.
 /// </remarks>
-public class JwtProductionSecurityValidator(string environment = "Production") : IValidateOptions<JwtOptions>
+public class JwtProductionSecurityValidator(
+    Microsoft.Extensions.Hosting.IHostEnvironment? environment,
+    Microsoft.Extensions.Logging.ILogger<JwtProductionSecurityValidator> logger) : IValidateOptions<JwtOptions>
 {
-    private readonly string _environment = environment;
-
     /// <inheritdoc />
     public ValidateOptionsResult Validate(string? name, JwtOptions options)
     {
-        if (options is null || _environment != "Production")
+        // DIDÁCTICA (auditoría): el entorno viene de IHostEnvironment (antes estaba hardcodeado
+        // a "Development", por lo que el validador era dead code). Si no hay hosting (DI sin
+        // IHostEnvironment), se trata como no-producción (defensivo, sin romper el arranque).
+        if (options is null || environment is null || !environment.IsProduction())
         {
             return ValidateOptionsResult.Success;
         }
@@ -170,10 +175,10 @@ public class JwtProductionSecurityValidator(string environment = "Production") :
                 "HS256 requiere compartir la misma clave entre múltiples servicios.");
         }
 
-        // Log warnings pero no fallar (cambiar a return Success con logging)
+        // Log warnings pero no fallar
         if (warnings.Count > 0)
         {
-            System.Diagnostics.Debug.WriteLine("JWT Security Warnings: " + string.Join(" ", warnings));
+            logger.LogWarning("Advertencias de seguridad JWT en producción: {Warnings}", string.Join(" ", warnings));
         }
 
         return ValidateOptionsResult.Success;

@@ -668,6 +668,32 @@ expiry. For hosts that need to revoke it:
 - JWT validation (`OnTokenValidated` hook) rejects blacklisted jti per request.
 - The host registers its implementation (in-memory, Redis, etc.) BEFORE `AddSecureAuth()` (TryAdd).
 
+**F7 (v3.2.0) — Composable HTTP kit (A-26)**:
+
+The HTTP surface is no longer an all-or-nothing bundle:
+
+- **Per-feature public handlers** (`SecureAuthEndpoints.LoginHandler`, `MeHandler`, `RefreshHandler`,
+  `LogoutHandler`, `RevokeAllHandler`, `ForgotPasswordHandler`, `ResetPasswordHandler`,
+  `VerifyActionSendHandler`, `VerifyActionVerifyHandler`, `CreatePasswordHandler`, `ChangePasswordHandler`
+  + recovery and WebAuthn handlers). The host re-routes them: `app.MapPost("/custom", SecureAuthEndpoints.LoginHandler)`.
+- **`AuthEndpointDescriptor`** (declarative: Method, Route, Handler, authz, filters, name, description)
+  and **`MapAuthEndpoints(prefix, params descriptors)`** as the generic composer (OCP: a new feature
+  is a new descriptor; the composer is not modified).
+- **Per-group mappers**: `MapSecureAuthSessionEndpoints` (login/me/refresh/logout/revoke-all),
+  `MapSecureAuthPasswordResetEndpoints` (forgot/reset), `MapSecureAuthCredentialEndpoints`
+  (create/change-password), `MapSecureAuthVerifyActionEndpoints` (verify-action/send|verify).
+  `MapSecureAuthEndpoints` composes all (non-breaking). Recovery and WebAuthn are descriptors too.
+- **`EnforceAnonymousRequestSizeLimit` public**: reusable on the host's own surface.
+
+**Uniform wiring (F7 + F8)**: `SecureAuthOptions` is registered once and the appsettings ↔ Fluent
+merge is structural (F8): a `SecureAuthOptionsBootstrap` binds `SecureAuth:`, `SecureAuth:Jwt:` and
+`SecureAuth:Argon2:` and runs the host `configure` on those instances (appsettings = base, Fluent =
+overlay). JWT Bearer validation is configured from `IOptions<JwtOptions>` (same source as emission).
+`MfaOptions` uses `BindConfiguration` + the `AddMfa` `configure` on the bound instance. The
+MFA/password stack uses `TryAdd*` (host overrides respected). Anonymous handlers self-protect with an
+intrinsic `Content-Length` check (the protection travels with a re-routed handler).
+`SecureAuthConfiguration.Mfa` is `[Obsolete]` (dead property; remove in v4).
+
 ---
 
 ## 6. Security and Observability

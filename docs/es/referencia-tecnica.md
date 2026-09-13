@@ -587,6 +587,34 @@ expirar. Para hosts que necesitan revocarlo:
 - La validación JWT (hook `OnTokenValidated`) rechaza los jti blacklisted por request.
 - El host registra su implementación (in-memory, Redis, etc.) ANTES de `AddSecureAuth()` (TryAdd).
 
+**F7 (v3.2.0) — Kit HTTP componible (A-26)**:
+
+La superficie HTTP deja de ser un bundle all-or-nothing:
+
+- **Handlers públicos por feature** (`SecureAuthEndpoints.LoginHandler`, `MeHandler`, `RefreshHandler`,
+  `LogoutHandler`, `RevokeAllHandler`, `ForgotPasswordHandler`, `ResetPasswordHandler`,
+  `VerifyActionSendHandler`, `VerifyActionVerifyHandler`, `CreatePasswordHandler`, `ChangePasswordHandler`
+  + `GenerateRecoveryCodesHandler`/`VerifyRecoveryCodeHandler`/`UseRecoveryCodeHandler` y los de
+  `SecureAuthWebAuthnEndpoints`). El host los re-rutea: `app.MapPost("/custom", SecureAuthEndpoints.LoginHandler)`.
+- **`AuthEndpointDescriptor`** (declarativo: Method, Route, Handler, authz, filtros, name, description)
+  y **`MapAuthEndpoints(prefix, params descriptors)`** como compositor genérico (OCP: una feature
+  nueva es un descriptor nuevo; el compositor no se modifica).
+- **Mappers por grupo**: `MapSecureAuthSessionEndpoints` (login/me/refresh/logout/revoke-all),
+  `MapSecureAuthPasswordResetEndpoints` (forgot/reset), `MapSecureAuthCredentialEndpoints`
+  (create/change-password), `MapSecureAuthVerifyActionEndpoints` (verify-action/send|verify).
+  `MapSecureAuthEndpoints` = composición de todos (no-breaking). Recovery y WebAuthn también son
+  descriptores.
+- **`EnforceAnonymousRequestSizeLimit` público**: reutilizable en la superficie propia del host.
+
+**Wiring uniforme (F7 + F8)**: `SecureAuthOptions` se registra una vez y el merge appsettings ↔ Fluent
+es estructural (F8): un `SecureAuthOptionsBootstrap` vincula `SecureAuth:`, `SecureAuth:Jwt:` y
+`SecureAuth:Argon2:` y ejecuta el `configure` del host sobre esas instancias (appsettings = base,
+Fluent = overlay). La validación JWT Bearer se configura desde `IOptions<JwtOptions>` (misma fuente
+que la emisión). `MfaOptions` usa `BindConfiguration` + el `configure` de `AddMfa` sobre la instancia
+vinculada. El stack MFA/password usa `TryAdd*` (overrides del host respetados). Los handlers
+anónimos se auto-protegen con un check de `Content-Length` intrínseco (la protección viaja con el
+handler re-ruteado). `SecureAuthConfiguration.Mfa` quedó `[Obsolete]` (dead property; eliminar en v4).
+
 ---
 
 ## 6. Seguridad y Observabilidad
